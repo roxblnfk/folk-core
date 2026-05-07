@@ -1,0 +1,3 @@
+//! Pipe-based PHP worker runtime for Folk: spawn via execve.
+//!
+//! See `folk-spec/spec/01-architecture.md` for the role of this crate.

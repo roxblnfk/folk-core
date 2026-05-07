@@ -1,0 +1,11 @@
+/target
+/Cargo.lock
+.DS_Store
+*.swp
+.idea/
+.vscode/
+.direnv/
+.envrc
+# Local folk-api patch override — not for committing
+.cargo/config.toml
+/.claude
