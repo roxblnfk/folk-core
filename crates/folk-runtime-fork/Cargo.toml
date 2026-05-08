@@ -10,4 +10,26 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dependencies]
+folk-api = { path = "../../../folk-api" }
+folk-core = { path = "../folk-core" }
+folk-protocol = { path = "../folk-protocol" }
+folk-runtime-pipe = { path = "../folk-runtime-pipe" }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
+futures-util = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+rmpv = { workspace = true }
+rmp-serde = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"
+rmpv = { workspace = true }

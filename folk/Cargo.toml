@@ -18,6 +18,7 @@ path = "src/main.rs"
 folk-api = { path = "../../folk-api" }
 folk-core = { path = "../crates/folk-core" }
 folk-runtime-pipe = { path = "../crates/folk-runtime-pipe" }
+folk-runtime-fork = { path = "../crates/folk-runtime-fork" }
 clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
