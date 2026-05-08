@@ -15,3 +15,13 @@ name = "folk"
 path = "src/main.rs"
 
 [dependencies]
+folk-api = { path = "../../folk-api" }
+folk-core = { path = "../crates/folk-core" }
+folk-runtime-pipe = { path = "../crates/folk-runtime-pipe" }
+clap = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+libc = { workspace = true }

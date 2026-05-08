@@ -1,0 +1,9 @@
+[workers]
+script = "vendor/bin/folk-worker"
+php    = "php"
+count  = 1
+
+[server]
+runtime    = "pipe"
+rpc_socket = "/tmp/folk-e2e-test.sock"
+shutdown_timeout = "5s"
