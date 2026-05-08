@@ -1,0 +1,135 @@
+//! Configuration loading.
+//!
+//! Folk reads `folk.toml` from the working directory by default, with
+//! environment-variable overrides via the `FOLK_` prefix (e.g.,
+//! `FOLK_WORKERS_COUNT=8`).
+
+use std::path::Path;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use figment::Figment;
+use figment::providers::{Env, Format, Toml};
+use serde::{Deserialize, Serialize};
+
+/// Top-level Folk configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FolkConfig {
+    pub server: ServerConfig,
+    pub workers: WorkersConfig,
+    pub log: LogConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    /// Path to the admin RPC Unix socket. Default: `/tmp/folk.sock`.
+    pub rpc_socket: String,
+    /// Runtime selection: `pipe` (phase 4) or `fork` (phase 10).
+    pub runtime: RuntimeKind,
+    /// Maximum time to wait for graceful shutdown after SIGTERM.
+    #[serde(with = "humantime_serde")]
+    pub shutdown_timeout: Duration,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            rpc_socket: "/tmp/folk.sock".into(),
+            runtime: RuntimeKind::Pipe,
+            shutdown_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeKind {
+    Pipe,
+    Fork,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkersConfig {
+    /// Path to the PHP worker script (e.g., `vendor/bin/folk-worker`).
+    pub script: String,
+    /// PHP binary path (default: `php`).
+    pub php: String,
+    /// Number of worker processes.
+    pub count: usize,
+    /// Recycle a worker after this many requests.
+    pub max_jobs: u64,
+    /// Recycle a worker that has been alive longer than this.
+    #[serde(with = "humantime_serde")]
+    pub ttl: Duration,
+    /// Recycle a worker exceeding this RSS in MB.
+    pub max_memory_mb: u64,
+    /// Per-request execution timeout.
+    #[serde(with = "humantime_serde")]
+    pub exec_timeout: Duration,
+    /// Per-worker boot timeout (waits for `control.ready`).
+    #[serde(with = "humantime_serde")]
+    pub boot_timeout: Duration,
+}
+
+impl Default for WorkersConfig {
+    fn default() -> Self {
+        Self {
+            script: "vendor/bin/folk-worker".into(),
+            php: "php".into(),
+            count: 4,
+            max_jobs: 1000,
+            ttl: Duration::from_secs(3600),
+            max_memory_mb: 256,
+            exec_timeout: Duration::from_secs(30),
+            boot_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LogConfig {
+    /// Log level filter (e.g., `info`, `debug`, `folk_core=trace`).
+    pub filter: String,
+    /// Output format: `text`, `json`, or `pretty`.
+    pub format: LogFormat,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            filter: "info".into(),
+            format: LogFormat::Text,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LogFormat {
+    Text,
+    Json,
+    Pretty,
+}
+
+impl FolkConfig {
+    /// Load config from `folk.toml` in the current directory plus environment
+    /// variables prefixed with `FOLK_`. Missing file is OK; defaults are used.
+    pub fn load() -> Result<Self> {
+        Self::load_from(Path::new("folk.toml"))
+    }
+
+    /// Load config from a specific path. Missing file is OK; defaults are used.
+    pub fn load_from(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let mut fig = Figment::from(figment::providers::Serialized::defaults(Self::default()));
+        if path.exists() {
+            fig = fig.merge(Toml::file(path));
+        }
+        fig = fig.merge(Env::prefixed("FOLK_").split("_"));
+        fig.extract().context("failed to parse Folk configuration")
+    }
+}
