@@ -45,6 +45,9 @@ thiserror = "2"
 # metrics (only used in metrics plugin, but version pinned here for consistency)
 prometheus = { version = "0.13", features = ["process"] }
 
+# platform
+libc = "0.2"
+
 [workspace.lints.rust]
 unsafe_code = "warn"
 
