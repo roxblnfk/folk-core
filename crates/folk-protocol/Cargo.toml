@@ -11,3 +11,13 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+serde = { workspace = true }
+rmp-serde = { workspace = true }
+rmpv = { workspace = true }
+bytes = { workspace = true }
+tokio-util = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+proptest = "1"
