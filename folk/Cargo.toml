@@ -15,7 +15,7 @@ name = "folk"
 path = "src/main.rs"
 
 [dependencies]
-folk-api = { path = "../../folk-api" }
+folk-api = { git = "https://github.com/Folk-Project/folk-api" }
 folk-core = { path = "../crates/folk-core" }
 folk-runtime-pipe = { path = "../crates/folk-runtime-pipe" }
 folk-runtime-fork = { path = "../crates/folk-runtime-fork" }
