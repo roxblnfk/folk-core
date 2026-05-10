@@ -14,8 +14,7 @@ Rust-based application server for PHP. Long-lived workers, fork-based runtime wi
 
 ```toml
 # Cargo.toml
-folk-core = { git = "https://github.com/Folk-Project/folk-core" }
-# Once published: folk-core = "0.1"
+folk-core = "0.1"
 ```
 
 For most users, build a custom binary with [folk-builder](https://github.com/Folk-Project/folk-builder) instead of depending on this crate directly.
