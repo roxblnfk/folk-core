@@ -18,7 +18,7 @@ workspace = true
 libc = { workspace = true }
 
 [dependencies]
-folk-api = { git = "https://github.com/Folk-Project/folk-api" }
+folk-api = "0.1"
 folk-core = { path = "../folk-core" }
 folk-protocol = { path = "../folk-protocol" }
 

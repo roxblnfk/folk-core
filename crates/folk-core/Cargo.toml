@@ -16,9 +16,9 @@ workspace = true
 
 [dependencies]
 # folk-api is a separate repository. Once published, switch to:
-#   folk-api = { git = "https://github.com/Folk-Project/folk-api" }
+#   folk-api = "0.1"
 # For now, using local path during initial development.
-folk-api = { git = "https://github.com/Folk-Project/folk-api" }
+folk-api = "0.1"
 folk-protocol = { path = "../folk-protocol" }
 
 tokio = { workspace = true }
