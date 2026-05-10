@@ -6,16 +6,46 @@ on:
   pull_request:
     branches: [main, develop]
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  fmt:
+    name: Format
+    runs-on: [self-hosted, linux, x64]
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt
+        run: |
+          cargo fmt --all
+          if ! git diff --quiet; then
+            git config user.name "github-actions"
+            git config user.email "github-actions@github.com"
+            git add -A
+            git commit -m "style: auto-format [skip ci]"
+            git push
+          fi
+
   check:
     name: Check + Lint + Format
     runs-on: [self-hosted, linux, x64]
+    needs: fmt
+    if: always() && !failure()
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
