@@ -19,7 +19,7 @@ workspace = true
 #   folk-api = "0.1.1"
 # For now, using local path during initial development.
 folk-api = "0.1.1"
-folk-protocol = { version = "0.1", path = "../folk-protocol" }
+folk-protocol = { version = "0.1.1", path = "../folk-protocol" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }
