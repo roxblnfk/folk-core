@@ -22,7 +22,7 @@ pub struct SpawnedWorker {
 
 /// Spawn a PHP worker process.
 ///
-/// Sets `FOLK_RUNTIME=pipe`, `FOLK_TASK_FD=3`, `FOLK_CONTROL_FD=4` in the
+/// Sets `FOLK_RUNTIME`, `FOLK_TASK_FD=3`, `FOLK_CONTROL_FD=4` in the
 /// environment. The child receives a connected Unix socket on each of FD 3
 /// and FD 4.
 ///
@@ -34,6 +34,12 @@ pub struct SpawnedWorker {
 /// - We do not allocate or use Rust data structures in the callback.
 #[allow(unsafe_code)]
 pub fn spawn_worker(php: &str, script: &str) -> Result<SpawnedWorker> {
+    spawn_worker_with_runtime(php, script, "pipe")
+}
+
+/// Like [`spawn_worker`] but with a custom `FOLK_RUNTIME` value.
+#[allow(unsafe_code)]
+pub fn spawn_worker_with_runtime(php: &str, script: &str, runtime: &str) -> Result<SpawnedWorker> {
     let (task_master_fd, task_child_fd) = create_socketpair()?;
     let (ctrl_master_fd, ctrl_child_fd) = create_socketpair()?;
 
@@ -42,7 +48,7 @@ pub fn spawn_worker(php: &str, script: &str) -> Result<SpawnedWorker> {
 
     let mut cmd = Command::new(php);
     cmd.arg(script)
-        .env("FOLK_RUNTIME", "pipe")
+        .env("FOLK_RUNTIME", runtime)
         .env("FOLK_TASK_FD", TASK_FD.to_string())
         .env("FOLK_CONTROL_FD", CONTROL_FD.to_string())
         .stdin(std::process::Stdio::null())
