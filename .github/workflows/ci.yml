@@ -19,6 +19,9 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     if: github.event_name == 'push'
     steps:
+      - name: Free disk space
+        run: cargo clean 2>/dev/null || true
+
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
@@ -43,6 +46,9 @@ jobs:
     needs: fmt
     if: always() && !failure()
     steps:
+      - name: Free disk space
+        run: cargo clean 2>/dev/null || true
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.ref }}
@@ -69,6 +75,9 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     needs: check
     steps:
+      - name: Free disk space
+        run: cargo clean 2>/dev/null || true
+
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
@@ -85,6 +94,9 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     needs: test
     steps:
+      - name: Free disk space
+        run: cargo clean 2>/dev/null || true
+
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
