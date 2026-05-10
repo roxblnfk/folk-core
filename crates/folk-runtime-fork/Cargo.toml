@@ -21,7 +21,7 @@ libc = { workspace = true }
 folk-api = "0.1.1"
 folk-core = { version = "0.1.1", path = "../folk-core" }
 folk-protocol = { version = "0.1.1", path = "../folk-protocol" }
-folk-runtime-pipe = { version = "0.1.1", path = "../folk-runtime-pipe" }
+folk-runtime-pipe = { version = "0.1.2", path = "../folk-runtime-pipe" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }
