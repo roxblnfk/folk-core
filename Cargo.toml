@@ -15,6 +15,9 @@ rust-version = "1.85"
 license = "MIT"
 authors = ["Folk Contributors"]
 repository = "https://github.com/Folk-Project/folk-core"
+homepage = "https://github.com/Folk-Project"
+keywords = ["folk", "php", "server", "async"]
+categories = ["asynchronous", "web-programming"]
 
 [workspace.dependencies]
 # core async + io

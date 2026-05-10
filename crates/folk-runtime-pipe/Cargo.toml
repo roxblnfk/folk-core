@@ -1,11 +1,15 @@
 [package]
 name = "folk-runtime-pipe"
+description = "Pipe-based worker runtime for Folk — spawns PHP workers via execve with Unix socketpairs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lints]
 workspace = true
