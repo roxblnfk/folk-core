@@ -47,7 +47,7 @@ pub fn spawn_worker(php: &str, script: &str) -> Result<SpawnedWorker> {
         .env("FOLK_CONTROL_FD", CONTROL_FD.to_string())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::inherit());
 
     // SAFETY: we only call async-signal-safe libc functions and use only
     // captured primitive integers (no heap allocation, no Rust drop).

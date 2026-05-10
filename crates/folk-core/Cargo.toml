@@ -16,9 +16,9 @@ workspace = true
 
 [dependencies]
 # folk-api is a separate repository. Once published, switch to:
-#   folk-api = "0.1"
+#   folk-api = "0.1.1"
 # For now, using local path during initial development.
-folk-api = "0.1"
+folk-api = "0.1.1"
 folk-protocol = { version = "0.1", path = "../folk-protocol" }
 
 tokio = { workspace = true }

@@ -36,8 +36,9 @@ pub enum WorkError {
     Io(#[from] std::io::Error),
 }
 
-/// One dispatch request: payload + reply channel.
+/// One dispatch request: method name, payload + reply channel.
 struct DispatchRequest {
+    method: String,
     payload: Bytes,
     reply: oneshot::Sender<Result<Bytes>>,
 }
@@ -70,7 +71,7 @@ impl WorkerPool {
 
 #[async_trait]
 impl Executor for WorkerPool {
-    async fn execute(&self, payload: Bytes) -> Result<Bytes> {
+    async fn execute_method(&self, method: &str, payload: Bytes) -> Result<Bytes> {
         let permit = self
             .semaphore
             .clone()
@@ -81,6 +82,7 @@ impl Executor for WorkerPool {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.request_tx
             .send(DispatchRequest {
+                method: method.to_string(),
                 payload,
                 reply: reply_tx,
             })
@@ -172,7 +174,7 @@ async fn slot_supervisor(
 
         // Dispatch.
         slot.mark_busy();
-        let result = dispatch_one(w.as_mut(), req.payload, config.exec_timeout).await;
+        let result = dispatch_one(w.as_mut(), &req.method, req.payload, config.exec_timeout).await;
         slot.mark_idle();
 
         // Send reply.
@@ -220,6 +222,7 @@ async fn boot_worker(
 
 async fn dispatch_one(
     worker: &mut dyn WorkerHandle,
+    method: &str,
     payload: Bytes,
     exec_timeout: Duration,
 ) -> Result<Bytes, WorkError> {
@@ -228,7 +231,7 @@ async fn dispatch_one(
 
     let params = rmp_serde::from_slice::<RmpValue>(&payload)
         .map_err(|e| WorkError::Protocol(folk_protocol::Error::Decode(e)))?;
-    let request = RpcMessage::request(msgid, "dispatch", params);
+    let request = RpcMessage::request(msgid, method, params);
 
     worker
         .send_task(request)

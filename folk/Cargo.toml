@@ -19,7 +19,7 @@ name = "folk"
 path = "src/main.rs"
 
 [dependencies]
-folk-api = "0.1"
+folk-api = "0.1.1"
 folk-core = { version = "0.1", path = "../crates/folk-core" }
 folk-runtime-pipe = { version = "0.1", path = "../crates/folk-runtime-pipe" }
 folk-runtime-fork = { version = "0.1", path = "../crates/folk-runtime-fork" }
