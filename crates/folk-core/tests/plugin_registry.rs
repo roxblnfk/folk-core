@@ -38,7 +38,7 @@ impl Plugin for TrackingPlugin {
 struct StubExecutor;
 #[async_trait]
 impl Executor for StubExecutor {
-    async fn execute(&self, _: Bytes) -> Result<Bytes> {
+    async fn execute_method(&self, _method: &str, _payload: Bytes) -> Result<Bytes> {
         unimplemented!()
     }
 }
