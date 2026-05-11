@@ -101,7 +101,11 @@ async fn handle_connection(
 
 async fn dispatch(registry: &RpcRegistry, msg: RpcMessage) -> RpcMessage {
     match msg {
-        RpcMessage::Request { msgid, method, params } => {
+        RpcMessage::Request {
+            msgid,
+            method,
+            params,
+        } => {
             let payload = rmp_serde::to_vec(&params)
                 .map(bytes::Bytes::from)
                 .unwrap_or_default();

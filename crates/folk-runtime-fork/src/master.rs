@@ -26,9 +26,8 @@ impl PreforkMaster {
     pub async fn spawn(php: &str, script: &str, boot_timeout: std::time::Duration) -> Result<Self> {
         // Re-use PipeRuntime's spawn_worker for the initial master process,
         // but set FOLK_RUNTIME=fork so the PHP side enters ForkMasterLoop.
-        let spawned =
-            folk_runtime_pipe::spawn::spawn_worker_with_runtime(php, script, "fork")
-                .context("spawn prefork master")?;
+        let spawned = folk_runtime_pipe::spawn::spawn_worker_with_runtime(php, script, "fork")
+            .context("spawn prefork master")?;
         let mut control = Framed::new(spawned.control_master, FrameCodec::new());
         let pid = spawned.child.id().unwrap_or(0);
 
