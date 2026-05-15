@@ -14,10 +14,14 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["standalone"]
+# standalone: includes PHP class/function/module registration.
+# Disable when used as rlib dependency (folk-builder generates its own wrappers).
+standalone = []
+
 [lib]
 crate-type = ["cdylib", "rlib"]
-# cdylib: standalone extension (no plugins)
-# rlib: used as dependency by folk-builder generated code
 
 [dependencies]
 folk-api = "0.1.1"

@@ -101,8 +101,11 @@ pub fn call_method(method: &str, payload: bytes::Bytes) -> anyhow::Result<bytes:
     handle.block_on(registry.call(method, payload))
 }
 
-// --- PHP wrappers (for standalone cdylib mode) ---
+// --- PHP wrappers (standalone mode only — when folk-ext IS the extension) ---
+// When used as rlib by folk-builder, these are NOT compiled to avoid
+// duplicate `get_module` symbols.
 
+#[cfg(feature = "standalone")]
 #[php_class]
 #[php(name = "Folk\\Server")]
 #[derive(Debug)]
@@ -110,6 +113,7 @@ pub struct Server {
     config_path: String,
 }
 
+#[cfg(feature = "standalone")]
 #[php_impl]
 impl Server {
     pub fn __construct(config_path: String) -> Self {
@@ -127,11 +131,13 @@ impl Server {
     }
 }
 
+#[cfg(feature = "standalone")]
 #[php_function]
 pub fn folk_version() -> String {
     version()
 }
 
+#[cfg(feature = "standalone")]
 #[php_function]
 pub fn folk_call(method: String, payload: Binary<u8>) -> PhpResult<Binary<u8>> {
     let data: Vec<u8> = payload.into();
@@ -141,11 +147,13 @@ pub fn folk_call(method: String, payload: Binary<u8>) -> PhpResult<Binary<u8>> {
     Ok(Binary::new(result.to_vec()))
 }
 
+#[cfg(feature = "standalone")]
 #[php_function]
 pub fn folk_worker_ready() -> PhpResult<bool> {
     bridge::do_ready().map_err(|e| PhpException::default(format!("folk_worker_ready: {e}")))
 }
 
+#[cfg(feature = "standalone")]
 #[php_function]
 pub fn folk_worker_recv() -> PhpResult<Option<Vec<Binary<u8>>>> {
     match bridge::do_recv() {
@@ -158,18 +166,21 @@ pub fn folk_worker_recv() -> PhpResult<Option<Vec<Binary<u8>>>> {
     }
 }
 
+#[cfg(feature = "standalone")]
 #[php_function]
 pub fn folk_worker_send(result: Binary<u8>) -> PhpResult<()> {
     let data: Vec<u8> = result.into();
     bridge::do_send(data).map_err(|e| PhpException::default(format!("folk_worker_send: {e}")))
 }
 
+#[cfg(feature = "standalone")]
 #[php_function]
 pub fn folk_worker_send_error(message: String) -> PhpResult<()> {
     bridge::do_send_error(message)
         .map_err(|e| PhpException::default(format!("folk_worker_send_error: {e}")))
 }
 
+#[cfg(feature = "standalone")]
 #[php_module]
 pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
     module
