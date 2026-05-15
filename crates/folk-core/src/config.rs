@@ -26,8 +26,6 @@ pub struct FolkConfig {
 pub struct ServerConfig {
     /// Path to the admin RPC Unix socket. Default: `/tmp/folk.sock`.
     pub rpc_socket: String,
-    /// Runtime selection: `pipe` (phase 4) or `fork` (phase 10).
-    pub runtime: RuntimeKind,
     /// Maximum time to wait for graceful shutdown after SIGTERM.
     #[serde(with = "humantime_serde")]
     pub shutdown_timeout: Duration,
@@ -37,17 +35,9 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             rpc_socket: "/tmp/folk.sock".into(),
-            runtime: RuntimeKind::Pipe,
             shutdown_timeout: Duration::from_secs(30),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeKind {
-    Pipe,
-    Fork,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

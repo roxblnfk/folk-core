@@ -1,0 +1,39 @@
+[package]
+name = "folk-ext"
+description = "Folk PHP extension — runs the Folk server as a PHP extension (like Swoole)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+# cdylib: standalone extension (no plugins)
+# rlib: used as dependency by folk-builder generated code
+
+[dependencies]
+folk-api = "0.1.1"
+folk-core = { version = "0.1.1", path = "../folk-core" }
+
+ext-php-rs = "0.15"
+
+tokio = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+rmpv = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+[build-dependencies]
+ext-php-rs-build = "0.1"

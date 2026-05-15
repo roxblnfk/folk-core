@@ -9,8 +9,6 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
 use folk_api::Executor;
-use folk_protocol::RpcMessage;
-use rmpv::Value as RmpValue;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -30,10 +28,8 @@ pub enum WorkError {
     Timeout,
     #[error("worker returned application error: {message}")]
     Application { code: i32, message: String },
-    #[error("protocol error: {0}")]
-    Protocol(#[from] folk_protocol::Error),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 /// One dispatch request: method name, payload + reply channel.
@@ -72,6 +68,11 @@ impl WorkerPool {
 #[async_trait]
 impl Executor for WorkerPool {
     async fn execute_method(&self, method: &str, payload: Bytes) -> Result<Bytes> {
+        debug!(
+            method,
+            payload_len = payload.len(),
+            "pool: execute_method called"
+        );
         let permit = self
             .semaphore
             .clone()
@@ -196,22 +197,21 @@ async fn boot_worker(
     config: &WorkersConfig,
     slot: &mut SlotInfo,
 ) -> Result<Box<dyn WorkerHandle>> {
+    debug!("boot_worker: spawning");
     let mut handle = runtime.spawn().await.context("spawn")?;
-    let timeout = tokio::time::timeout(config.boot_timeout, handle.recv_control());
+    debug!(id = handle.id(), "boot_worker: waiting for ready");
+
+    let timeout = tokio::time::timeout(config.boot_timeout, handle.ready());
     match timeout.await {
-        Ok(Ok(Some(RpcMessage::Notify { method, .. }))) if method == "control.ready" => {
-            let pid = handle.pid();
-            slot.mark_ready(pid);
-            debug!(pid, "worker ready");
+        Ok(Ok(())) => {
+            let id = handle.id();
+            slot.mark_ready(id);
+            debug!(id, "worker ready");
             Ok(handle)
-        },
-        Ok(Ok(other)) => {
-            let _ = handle.terminate().await;
-            anyhow::bail!("expected control.ready, got {other:?}")
         },
         Ok(Err(e)) => {
             let _ = handle.terminate().await;
-            Err(e).context("recv_control failed during boot")
+            Err(e).context("worker ready() failed during boot")
         },
         Err(_) => {
             let _ = handle.terminate().await;
@@ -226,40 +226,10 @@ async fn dispatch_one(
     payload: Bytes,
     exec_timeout: Duration,
 ) -> Result<Bytes, WorkError> {
-    static MSGID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-    let msgid = MSGID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-    let params = rmp_serde::from_slice::<RmpValue>(&payload)
-        .map_err(|e| WorkError::Protocol(folk_protocol::Error::Decode(e)))?;
-    let request = RpcMessage::request(msgid, method, params);
-
-    worker
-        .send_task(request)
-        .await
-        .map_err(|_| WorkError::WorkerDied)?;
-
-    let recv = tokio::time::timeout(exec_timeout, worker.recv_task());
-    let response = match recv.await {
-        Ok(Ok(Some(msg))) => msg,
-        Ok(Ok(None) | Err(_)) => return Err(WorkError::WorkerDied),
-        Err(_) => return Err(WorkError::Timeout),
-    };
-
-    match response {
-        RpcMessage::Response { error, result, .. } => {
-            if !error.is_nil() {
-                return Err(WorkError::Application {
-                    code: -1,
-                    message: format!("{error:?}"),
-                });
-            }
-            let mut buf = Vec::new();
-            rmp_serde::encode::write(&mut buf, &result)
-                .map_err(|e| WorkError::Protocol(folk_protocol::Error::Encode(e)))?;
-            Ok(Bytes::from(buf))
-        },
-        other => Err(WorkError::Protocol(folk_protocol::Error::InvalidFrame(
-            format!("expected Response, got {other:?}"),
-        ))),
+    let recv = tokio::time::timeout(exec_timeout, worker.execute(method, payload));
+    match recv.await {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(e)) => Err(WorkError::Internal(e.to_string())),
+        Err(_) => Err(WorkError::Timeout),
     }
 }

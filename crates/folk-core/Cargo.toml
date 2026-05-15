@@ -1,6 +1,6 @@
 [package]
 name = "folk-core"
-description = "Server core for Folk PHP application server — worker pool, plugin registry, admin RPC"
+description = "Server core for Folk PHP application server — worker pool, plugin registry"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,10 +19,8 @@ workspace = true
 #   folk-api = "0.1.1"
 # For now, using local path during initial development.
 folk-api = "0.1.1"
-folk-protocol = { version = "0.1.1", path = "../folk-protocol" }
 
 tokio = { workspace = true }
-tokio-util = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }

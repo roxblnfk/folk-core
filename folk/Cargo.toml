@@ -1,6 +1,6 @@
 [package]
 name = "folk"
-description = "Reference binary for Folk PHP application server"
+description = "Reference binary for Folk PHP application server (deprecated — use folk.so extension)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,16 +17,3 @@ workspace = true
 [[bin]]
 name = "folk"
 path = "src/main.rs"
-
-[dependencies]
-folk-api = "0.1.1"
-folk-core = { version = "0.1.1", path = "../crates/folk-core" }
-folk-runtime-pipe = { version = "0.1.1", path = "../crates/folk-runtime-pipe" }
-folk-runtime-fork = { version = "0.1.1", path = "../crates/folk-runtime-fork" }
-clap = { workspace = true }
-tokio = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
-
-[dev-dependencies]
-libc = { workspace = true }

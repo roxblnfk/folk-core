@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use folk_core::config::{FolkConfig, RuntimeKind};
+use folk_core::config::FolkConfig;
 use tempfile::NamedTempFile;
 
 #[test]
@@ -8,7 +8,6 @@ fn default_config_is_usable() {
     let cfg = FolkConfig::default();
     assert_eq!(cfg.workers.count, 4);
     assert_eq!(cfg.workers.max_jobs, 1000);
-    assert_eq!(cfg.server.runtime, RuntimeKind::Pipe);
 }
 
 #[test]
@@ -28,5 +27,5 @@ fn loads_from_toml_overrides_defaults() {
     assert_eq!(cfg.workers.count, 16);
     assert_eq!(cfg.workers.max_jobs, 5000);
     // Other defaults preserved
-    assert_eq!(cfg.server.runtime, RuntimeKind::Pipe);
+    assert_eq!(cfg.server.rpc_socket, "/tmp/folk.sock");
 }

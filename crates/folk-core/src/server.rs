@@ -1,12 +1,11 @@
 //! `FolkServer`: the lifecycle owner for the Folk application server.
 //!
-//! Typically constructed by the `folk` binary (phase 5) or by `folk-builder`-
-//! generated binaries. In tests, use `FolkServer::new(config, mock_runtime)`.
+//! Constructed by `folk-ext` (PHP extension) or in tests with `MockRuntime`.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use folk_api::{Plugin, PluginContext};
+use folk_api::{Plugin, PluginContext, RpcRegistrar};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -15,8 +14,6 @@ use crate::health_registry::HealthRegistryImpl;
 use crate::logging;
 use crate::metrics_registry::MetricsRegistryImpl;
 use crate::plugin_registry::PluginRegistry;
-use crate::rpc_registry::RpcRegistry;
-use crate::rpc_server;
 use crate::runtime::Runtime;
 use crate::worker_pool::WorkerPool;
 
@@ -25,19 +22,24 @@ pub struct FolkServer {
     config: FolkConfig,
     runtime: Arc<dyn Runtime>,
     plugins: PluginRegistry,
+    rpc_registrar: Option<Arc<dyn RpcRegistrar>>,
 }
 
 impl FolkServer {
     /// Construct a server with the given config and runtime.
-    ///
-    /// In production, the runtime is `folk_runtime_pipe::PipeRuntime`
-    /// (phase 4). For tests, pass `MockRuntime::echo()`.
     pub fn new(config: FolkConfig, runtime: Arc<dyn Runtime>) -> Self {
         Self {
             config,
             runtime,
             plugins: PluginRegistry::new(),
+            rpc_registrar: None,
         }
+    }
+
+    /// Set an in-process RPC registrar for plugin method registration.
+    /// Plugins will register their handlers here during boot.
+    pub fn set_rpc_registrar(&mut self, registrar: Arc<dyn RpcRegistrar>) {
+        self.rpc_registrar = Some(registrar);
     }
 
     /// Register a plugin. Call before `run`.
@@ -45,51 +47,34 @@ impl FolkServer {
         self.plugins.register(plugin);
     }
 
-    /// Run the server until SIGTERM (or SIGINT on dev builds).
-    ///
-    /// This method:
-    /// 1. Initializes logging.
-    /// 2. Spawns the worker pool.
-    /// 3. Boots all registered plugins.
-    /// 4. Starts the admin RPC server.
-    /// 5. Waits for SIGTERM.
-    /// 6. Gracefully shuts down: RPC server, plugins (in reverse), pool.
-    /// 7. Returns `Ok(())` on clean exit.
+    /// Run the server until SIGTERM/SIGINT.
     pub async fn run(mut self) -> Result<()> {
-        // 1. Logging.
-        let _ = logging::init(&self.config.log); // ignore reinit errors in tests
+        let _ = logging::init(&self.config.log);
 
         info!(
             version = folk_api::FOLK_API_VERSION,
             workers = self.config.workers.count,
-            runtime = ?self.config.server.runtime,
             "folk server starting"
         );
 
-        // 2. Shutdown broadcast.
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        // 3. Registries.
-        let rpc_registry = RpcRegistry::new();
         let health_registry = HealthRegistryImpl::new();
         let metrics_registry = MetricsRegistryImpl::new();
 
-        // 4. Worker pool.
         let pool = WorkerPool::new(self.runtime.clone(), self.config.workers.clone())
             .context("failed to start worker pool")?;
 
         info!("worker pool started");
 
-        // 5. Plugin context.
         let ctx = PluginContext {
             executor: pool.clone(),
             shutdown: shutdown_rx.clone(),
-            rpc_registrar: Some(rpc_registry.clone()),
+            rpc_registrar: self.rpc_registrar.clone(),
             health_registry: Some(health_registry.clone()),
             metrics_registry: Some(metrics_registry.clone()),
         };
 
-        // 6. Boot plugins.
         self.plugins
             .boot_all(&ctx)
             .await
@@ -97,24 +82,12 @@ impl FolkServer {
 
         info!(plugins = ?self.plugins.names(), "all plugins booted");
 
-        // 7. Start admin RPC server.
-        let rpc_path = self.config.server.rpc_socket.clone();
-        let rpc_reg = rpc_registry.clone();
-        let rpc_sd = shutdown_rx.clone();
-        let rpc_task = tokio::spawn(async move {
-            if let Err(e) = rpc_server::run_rpc_server(&rpc_path, rpc_reg, rpc_sd).await {
-                warn!(error = ?e, "admin RPC server error");
-            }
-        });
-
-        // 8. Wait for shutdown signal.
+        // Wait for shutdown signal.
         wait_for_signal().await;
         info!("shutdown signal received; draining");
 
-        // 9. Signal all components.
         let _ = shutdown_tx.send(true);
 
-        // 10. Shutdown timeout.
         let timeout = self.config.server.shutdown_timeout;
         let shutdown_result =
             tokio::time::timeout(timeout, async { self.plugins.shutdown_all().await }).await;
@@ -123,7 +96,6 @@ impl FolkServer {
             warn!(?timeout, "graceful shutdown timed out; forcing");
         }
 
-        rpc_task.abort();
         info!("folk server stopped");
         Ok(())
     }

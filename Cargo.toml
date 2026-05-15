@@ -1,17 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/folk-protocol",
     "crates/folk-core",
-    "crates/folk-runtime-pipe",
-    "crates/folk-runtime-fork",
+    "crates/folk-ext",
     "folk",
 ]
 
 [workspace.package]
 version = "0.1.18"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 authors = ["Folk Contributors"]
 repository = "https://github.com/Folk-Project/folk-core"

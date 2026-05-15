@@ -7,8 +7,6 @@ pub mod health_registry;
 pub mod logging;
 pub mod metrics_registry;
 pub mod plugin_registry;
-pub mod rpc_registry;
-pub mod rpc_server;
 pub mod runtime;
 pub mod server;
 pub mod worker_pool;
