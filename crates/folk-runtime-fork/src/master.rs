@@ -18,6 +18,8 @@ pub struct PreforkMaster {
     pid: u32,
     /// Socket for sending FDs to the master via `SCM_RIGHTS`.
     fork_socket: UnixStream,
+    /// Keep the child process alive — dropping it sends SIGKILL.
+    _child: tokio::process::Child,
 }
 
 impl PreforkMaster {
@@ -49,6 +51,7 @@ impl PreforkMaster {
             control,
             pid,
             fork_socket: spawned.task_master,
+            _child: spawned.child,
         })
     }
 
