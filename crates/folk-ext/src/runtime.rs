@@ -1,89 +1,124 @@
-//! Extension runtime: pre-connected channel-based workers.
+//! Extension runtime: workers via channels.
 //!
-//! Creates N channel pairs before the server starts. Each spawn() returns
-//! a handle connected to the next channel pair. The PHP side (main process
-//! or forked children) takes the rx end via bridge::init_worker_state().
+//! Two modes:
+//! - **Single-worker (NTS):** Main PHP thread is the worker. Pre-connected channels.
+//! - **Multi-worker (ZTS):** Additional worker threads spawned from Rust,
+//!   each with its own PHP context via TSRM.
+//!
+//! Uses `std::sync` channels so worker threads don't need a tokio runtime.
 
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use folk_core::config::WorkersConfig;
 use folk_core::runtime::{Runtime, WorkerHandle};
-use tokio::sync::{mpsc, oneshot};
 use tracing::debug;
 
 use crate::bridge;
+use crate::worker;
 
 static NEXT_WORKER_ID: AtomicU32 = AtomicU32::new(1);
 
-/// A pre-created channel pair for one worker.
-pub struct WorkerChannels {
-    pub task_tx: mpsc::Sender<bridge::TaskRequest>,
-    pub task_rx: mpsc::Receiver<bridge::TaskRequest>,
-    pub ready_tx: oneshot::Sender<()>,
-    pub ready_rx: oneshot::Receiver<()>,
+/// Tx side of a worker channel pair (kept by the runtime/pool).
+pub struct WorkerTxSide {
+    pub task_tx: mpsc::SyncSender<bridge::TaskRequest>,
+    pub ready_rx: mpsc::Receiver<()>,
 }
 
-/// Runtime with N pre-connected channel pairs.
+/// Extension runtime — manages worker channels and ZTS threads.
 pub struct ExtensionRuntime {
-    #[allow(dead_code)]
     config: WorkersConfig,
-    /// Pre-created channel pairs. Taken one at a time by spawn().
-    channels: std::sync::Mutex<Vec<(mpsc::Sender<bridge::TaskRequest>, oneshot::Receiver<()>)>>,
+    /// Pre-created channel pairs for NTS mode (main thread worker).
+    channels: std::sync::Mutex<Vec<WorkerTxSide>>,
 }
 
 impl ExtensionRuntime {
-    /// Create a runtime with pre-connected channels.
-    /// `tx_sides` contains (task_tx, ready_rx) for each worker.
-    /// The rx sides are stored globally for PHP processes to pick up.
-    pub fn new(
-        config: WorkersConfig,
-        tx_sides: Vec<(mpsc::Sender<bridge::TaskRequest>, oneshot::Receiver<()>)>,
-    ) -> Self {
+    /// Create a runtime with pre-connected channels (for the main thread worker).
+    pub fn new(config: WorkersConfig, tx_sides: Vec<WorkerTxSide>) -> Self {
         Self {
             config,
             channels: std::sync::Mutex::new(tx_sides),
         }
+    }
+
+    /// Spawn a ZTS worker thread with fresh channels.
+    #[allow(clippy::unnecessary_wraps)] // Result for consistency with Runtime trait
+    fn spawn_zts_worker(&self) -> Result<Box<dyn WorkerHandle>> {
+        let worker_id = NEXT_WORKER_ID.fetch_add(1, Ordering::Relaxed);
+        let script = &self.config.script;
+
+        let (task_tx, task_rx) = mpsc::sync_channel::<bridge::TaskRequest>(8);
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<()>(1);
+
+        let _handle = worker::spawn_zts_worker(worker_id, script.to_string(), task_rx, ready_tx);
+
+        debug!(worker_id, "ZTS worker thread spawned");
+
+        Ok(Box::new(ChannelWorkerHandle {
+            worker_id,
+            task_tx: Some(task_tx),
+            ready_rx: Some(ready_rx),
+        }))
+    }
+
+    /// Take a pre-connected channel pair (for the main thread / NTS worker).
+    fn take_preconnected(&self) -> Result<Box<dyn WorkerHandle>> {
+        let worker_id = NEXT_WORKER_ID.fetch_add(1, Ordering::Relaxed);
+        let tx_side = self.channels.lock().unwrap().pop().ok_or_else(|| {
+            anyhow::anyhow!("no more pre-connected channels (worker {worker_id})")
+        })?;
+
+        debug!(worker_id, "pre-connected worker channel taken");
+
+        Ok(Box::new(ChannelWorkerHandle {
+            worker_id,
+            task_tx: Some(tx_side.task_tx),
+            ready_rx: Some(tx_side.ready_rx),
+        }))
     }
 }
 
 #[async_trait]
 impl Runtime for ExtensionRuntime {
     async fn spawn(&self) -> Result<Box<dyn WorkerHandle>> {
-        let worker_id = NEXT_WORKER_ID.fetch_add(1, Ordering::Relaxed);
+        // Try pre-connected channels first (main thread worker).
+        // If none left, spawn a ZTS worker thread.
+        let has_preconnected = !self.channels.lock().unwrap().is_empty();
 
-        let (task_tx, ready_rx) = self.channels.lock().unwrap().pop().ok_or_else(|| {
-            anyhow::anyhow!("no more pre-connected channels (worker {worker_id})")
-        })?;
-
-        debug!(worker_id, "worker channel connected");
-
-        Ok(Box::new(MainThreadWorkerHandle {
-            worker_id,
-            task_tx: Some(task_tx),
-            ready_rx: Some(ready_rx),
-        }))
+        if has_preconnected {
+            self.take_preconnected()
+        } else if self.config.count > 1 {
+            self.spawn_zts_worker()
+        } else {
+            anyhow::bail!("no workers available and ZTS multi-worker not requested")
+        }
     }
 }
 
-/// Handle connected to a PHP worker process via channels.
-pub struct MainThreadWorkerHandle {
+/// Handle connected to a worker via `std::sync` channels.
+///
+/// Works for both main-thread (NTS) and ZTS worker threads.
+pub struct ChannelWorkerHandle {
     worker_id: u32,
-    task_tx: Option<mpsc::Sender<bridge::TaskRequest>>,
-    ready_rx: Option<oneshot::Receiver<()>>,
+    task_tx: Option<mpsc::SyncSender<bridge::TaskRequest>>,
+    ready_rx: Option<mpsc::Receiver<()>>,
 }
 
 #[async_trait]
-impl WorkerHandle for MainThreadWorkerHandle {
+impl WorkerHandle for ChannelWorkerHandle {
     fn id(&self) -> u32 {
         self.worker_id
     }
 
     async fn ready(&mut self) -> Result<()> {
         if let Some(rx) = self.ready_rx.take() {
-            rx.await
+            // Block in spawn_blocking to avoid blocking the tokio runtime.
+            tokio::task::spawn_blocking(move || rx.recv())
+                .await
+                .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))?
                 .map_err(|_| anyhow::anyhow!("worker died before ready"))?;
         }
         Ok(())
@@ -93,20 +128,27 @@ impl WorkerHandle for MainThreadWorkerHandle {
         let tx = self
             .task_tx
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("worker terminated"))?;
+            .ok_or_else(|| anyhow::anyhow!("worker terminated"))?
+            .clone();
 
-        let (reply_tx, reply_rx) = oneshot::channel();
-        tx.send(bridge::TaskRequest {
-            method: method.to_string(),
-            payload,
-            reply: reply_tx,
+        let method = method.to_string();
+
+        // Use spawn_blocking for the reply recv to avoid blocking tokio.
+        tokio::task::spawn_blocking(move || {
+            let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+            tx.send(bridge::TaskRequest {
+                method,
+                payload,
+                reply: reply_tx,
+            })
+            .map_err(|_| anyhow::anyhow!("worker process gone"))?;
+
+            reply_rx
+                .recv()
+                .map_err(|_| anyhow::anyhow!("worker dropped reply"))?
         })
         .await
-        .map_err(|_| anyhow::anyhow!("worker process gone"))?;
-
-        reply_rx
-            .await
-            .map_err(|_| anyhow::anyhow!("worker dropped reply"))?
+        .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))?
     }
 
     async fn terminate(&mut self) -> Result<()> {

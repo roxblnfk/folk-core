@@ -1,35 +1,30 @@
 //! Folk PHP extension core — server lifecycle + worker bridge.
 //!
-//! Supports multi-worker via fork: start_server() creates N channel pairs,
-//! PHP forks N-1 children, each process takes one channel and enters the loop.
+//! Uses `std::sync` channels for worker communication (no tokio dependency
+//! on the worker thread side). Supports multi-worker via ZTS threads.
 
 pub mod bridge;
 pub mod registry;
 pub mod runtime;
 pub mod worker;
+pub mod zts;
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 
 use ext_php_rs::binary::Binary;
 use ext_php_rs::prelude::*;
 use folk_api::Plugin;
 use folk_core::config::FolkConfig;
-use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 
 use crate::registry::InProcessRegistry;
-use crate::runtime::ExtensionRuntime;
+use crate::runtime::{ExtensionRuntime, WorkerTxSide};
 
 pub use folk_core;
 
 static REGISTRY: OnceLock<Arc<InProcessRegistry>> = OnceLock::new();
 static TOKIO_HANDLE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
-
-/// Pending worker channels (rx sides) for forked processes to pick up.
-static PENDING_WORKERS: OnceLock<
-    Mutex<Vec<(mpsc::Receiver<bridge::TaskRequest>, oneshot::Sender<()>)>>,
-> = OnceLock::new();
 
 // --- Public Rust API ---
 
@@ -39,28 +34,28 @@ pub fn version() -> String {
 
 /// Start the server with plugins. Non-blocking.
 ///
-/// Creates `config.workers.count` channel pairs. The first worker's channels
-/// are installed for the current process. Additional channels are stored in
-/// PENDING_WORKERS for forked children to claim via `claim_worker_channel()`.
+/// Creates one channel pair for the main PHP thread (worker #1).
+/// Additional workers (count > 1) are spawned as ZTS threads by the runtime.
 pub fn start_server(config: FolkConfig, plugins: Vec<Box<dyn Plugin>>) -> anyhow::Result<()> {
     let worker_count = config.workers.count;
+    let is_zts = zts::is_zts();
 
-    let mut tx_sides = Vec::with_capacity(worker_count);
-    let mut rx_sides = Vec::with_capacity(worker_count);
-
-    for _ in 0..worker_count {
-        let (task_tx, task_rx) = mpsc::channel::<bridge::TaskRequest>(8);
-        let (ready_tx, ready_rx) = oneshot::channel::<()>();
-        tx_sides.push((task_tx, ready_rx));
-        rx_sides.push((task_rx, ready_tx));
+    if worker_count > 1 && !is_zts {
+        tracing::warn!(
+            worker_count,
+            "multi-worker requested but PHP is NTS; only 1 worker will be used"
+        );
     }
 
-    // First worker: current process.
-    let (first_rx, first_ready_tx) = rx_sides.remove(0);
-    bridge::init_worker_state(1, first_rx, first_ready_tx);
+    // Create one channel pair for the main thread worker.
+    let (task_tx, task_rx) = std::sync::mpsc::sync_channel::<bridge::TaskRequest>(8);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
 
-    // Remaining workers: stored for forked children.
-    PENDING_WORKERS.set(Mutex::new(rx_sides)).ok();
+    // Install main thread as worker #1.
+    bridge::init_worker_state(1, task_rx, ready_tx);
+
+    // Tx side goes to the runtime (for dispatching to main thread worker).
+    let tx_sides = vec![WorkerTxSide { task_tx, ready_rx }];
 
     let registry = InProcessRegistry::new();
     REGISTRY.set(registry.clone()).ok();
@@ -78,6 +73,8 @@ pub fn start_server(config: FolkConfig, plugins: Vec<Box<dyn Plugin>>) -> anyhow
             TOKIO_HANDLE.set(rt.handle().clone()).ok();
 
             rt.block_on(async move {
+                // Runtime gets the pre-connected channel for worker #1.
+                // Additional workers (ZTS) will be spawned on demand.
                 let ext_runtime = Arc::new(ExtensionRuntime::new(workers_config, tx_sides));
 
                 let mut server = folk_core::server::FolkServer::new(config, ext_runtime);
@@ -96,21 +93,9 @@ pub fn start_server(config: FolkConfig, plugins: Vec<Box<dyn Plugin>>) -> anyhow
     std::thread::sleep(std::time::Duration::from_millis(100));
     info!(
         worker_count,
-        "folk server started, main process is worker #1"
+        is_zts, "folk server started, main process is worker #1"
     );
     Ok(())
-}
-
-/// Claim the next pending worker channel (for forked children).
-/// Returns the worker_id, or None if no more channels.
-pub fn claim_worker_channel() -> Option<u32> {
-    static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(2);
-
-    let pending = PENDING_WORKERS.get()?;
-    let (rx, ready_tx) = pending.lock().ok()?.pop()?;
-    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    bridge::init_worker_state(id, rx, ready_tx);
-    Some(id)
 }
 
 pub fn call_method(method: &str, payload: bytes::Bytes) -> anyhow::Result<bytes::Bytes> {
@@ -160,6 +145,7 @@ pub fn folk_version() -> String {
 
 #[cfg(feature = "standalone")]
 #[php_function]
+#[allow(clippy::needless_pass_by_value)] // ext-php-rs requires owned types
 pub fn folk_call(method: String, payload: Binary<u8>) -> PhpResult<Binary<u8>> {
     let data: Vec<u8> = payload.into();
     let result = call_method(&method, bytes::Bytes::from(data))
@@ -196,17 +182,18 @@ pub fn folk_worker_send(result: Binary<u8>) -> PhpResult<()> {
 
 #[cfg(feature = "standalone")]
 #[php_function]
+#[allow(clippy::needless_pass_by_value)] // ext-php-rs requires owned types
 pub fn folk_worker_send_error(message: String) -> PhpResult<()> {
-    bridge::do_send_error(message)
+    bridge::do_send_error(&message)
         .map_err(|e| PhpException::default(format!("folk_worker_send_error: {e}")))
 }
 
-/// Claim a worker channel for a forked child process.
-/// Returns the worker ID, or null if no more workers available.
+/// Returns true if the current thread is a ZTS worker thread
+/// (has bridge state initialized by the runtime).
 #[cfg(feature = "standalone")]
 #[php_function]
-pub fn folk_claim_worker() -> Option<i64> {
-    claim_worker_channel().map(i64::from)
+pub fn folk_is_worker_thread() -> bool {
+    bridge::has_worker_state()
 }
 
 #[cfg(feature = "standalone")]
@@ -220,5 +207,5 @@ pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
         .function(wrap_function!(folk_worker_recv))
         .function(wrap_function!(folk_worker_send))
         .function(wrap_function!(folk_worker_send_error))
-        .function(wrap_function!(folk_claim_worker))
+        .function(wrap_function!(folk_is_worker_thread))
 }
