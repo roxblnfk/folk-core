@@ -1,11 +1,8 @@
-//! Extension runtime: the main PHP thread acts as a worker.
+//! Extension runtime: pre-connected channel-based workers.
 //!
-//! On NTS PHP, only the main thread can execute PHP. The tokio runtime
-//! runs in a background thread; requests are sent to the main thread
-//! via channels. The main thread calls folk_worker_recv/send.
-//!
-//! The runtime is "pre-connected": spawn() returns a handle that's
-//! already wired to channels set up before the server starts.
+//! Creates N channel pairs before the server starts. Each spawn() returns
+//! a handle connected to the next channel pair. The PHP side (main process
+//! or forked children) takes the rx end via bridge::init_worker_state().
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -21,28 +18,33 @@ use crate::bridge;
 
 static NEXT_WORKER_ID: AtomicU32 = AtomicU32::new(1);
 
-/// Runtime that connects workers to the main PHP thread via channels.
+/// A pre-created channel pair for one worker.
+pub struct WorkerChannels {
+    pub task_tx: mpsc::Sender<bridge::TaskRequest>,
+    pub task_rx: mpsc::Receiver<bridge::TaskRequest>,
+    pub ready_tx: oneshot::Sender<()>,
+    pub ready_rx: oneshot::Receiver<()>,
+}
+
+/// Runtime with N pre-connected channel pairs.
 pub struct ExtensionRuntime {
     #[allow(dead_code)]
     config: WorkersConfig,
-    /// Pre-created task sender for the main thread worker.
-    /// Taken on first spawn() call.
-    main_task_tx: std::sync::Mutex<Option<mpsc::Sender<bridge::TaskRequest>>>,
-    /// Pre-created ready receiver for the main thread worker.
-    main_ready_rx: std::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    /// Pre-created channel pairs. Taken one at a time by spawn().
+    channels: std::sync::Mutex<Vec<(mpsc::Sender<bridge::TaskRequest>, oneshot::Receiver<()>)>>,
 }
 
 impl ExtensionRuntime {
-    /// Create a runtime with pre-connected channels for the main thread.
+    /// Create a runtime with pre-connected channels.
+    /// `tx_sides` contains (task_tx, ready_rx) for each worker.
+    /// The rx sides are stored globally for PHP processes to pick up.
     pub fn new(
         config: WorkersConfig,
-        task_tx: mpsc::Sender<bridge::TaskRequest>,
-        ready_rx: oneshot::Receiver<()>,
+        tx_sides: Vec<(mpsc::Sender<bridge::TaskRequest>, oneshot::Receiver<()>)>,
     ) -> Self {
         Self {
             config,
-            main_task_tx: std::sync::Mutex::new(Some(task_tx)),
-            main_ready_rx: std::sync::Mutex::new(Some(ready_rx)),
+            channels: std::sync::Mutex::new(tx_sides),
         }
     }
 }
@@ -52,19 +54,11 @@ impl Runtime for ExtensionRuntime {
     async fn spawn(&self) -> Result<Box<dyn WorkerHandle>> {
         let worker_id = NEXT_WORKER_ID.fetch_add(1, Ordering::Relaxed);
 
-        // First worker: use the pre-connected main thread channels.
-        let task_tx = self.main_task_tx.lock().unwrap().take().ok_or_else(|| {
-            anyhow::anyhow!("only 1 worker supported in NTS mode (worker {worker_id} requested)")
+        let (task_tx, ready_rx) = self.channels.lock().unwrap().pop().ok_or_else(|| {
+            anyhow::anyhow!("no more pre-connected channels (worker {worker_id})")
         })?;
 
-        let ready_rx = self
-            .main_ready_rx
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("ready channel already taken"))?;
-
-        debug!(worker_id, "main thread worker connected");
+        debug!(worker_id, "worker channel connected");
 
         Ok(Box::new(MainThreadWorkerHandle {
             worker_id,
@@ -74,7 +68,7 @@ impl Runtime for ExtensionRuntime {
     }
 }
 
-/// Handle to the main PHP thread worker.
+/// Handle connected to a PHP worker process via channels.
 pub struct MainThreadWorkerHandle {
     worker_id: u32,
     task_tx: Option<mpsc::Sender<bridge::TaskRequest>>,
@@ -90,7 +84,7 @@ impl WorkerHandle for MainThreadWorkerHandle {
     async fn ready(&mut self) -> Result<()> {
         if let Some(rx) = self.ready_rx.take() {
             rx.await
-                .map_err(|_| anyhow::anyhow!("main thread died before ready"))?;
+                .map_err(|_| anyhow::anyhow!("worker died before ready"))?;
         }
         Ok(())
     }
@@ -108,11 +102,11 @@ impl WorkerHandle for MainThreadWorkerHandle {
             reply: reply_tx,
         })
         .await
-        .map_err(|_| anyhow::anyhow!("main thread gone"))?;
+        .map_err(|_| anyhow::anyhow!("worker process gone"))?;
 
         reply_rx
             .await
-            .map_err(|_| anyhow::anyhow!("main thread dropped reply"))?
+            .map_err(|_| anyhow::anyhow!("worker dropped reply"))?
     }
 
     async fn terminate(&mut self) -> Result<()> {

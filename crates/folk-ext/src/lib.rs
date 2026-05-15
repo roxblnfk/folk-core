@@ -1,19 +1,14 @@
 //! Folk PHP extension core — server lifecycle + worker bridge.
 //!
-//! This crate provides:
-//! - `start_server()` — start tokio in background, main thread = worker
-//! - `bridge` — worker channel communication (recv/send)
-//! - `registry` — in-process plugin method registry + `call()`
-//!
-//! PHP wrappers (#[php_class], #[php_function], #[php_module]) are either
-//! in this crate's own cdylib output, or in folk-builder generated code.
+//! Supports multi-worker via fork: start_server() creates N channel pairs,
+//! PHP forks N-1 children, each process takes one channel and enters the loop.
 
 pub mod bridge;
 pub mod registry;
 pub mod runtime;
 pub mod worker;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use ext_php_rs::binary::Binary;
@@ -28,29 +23,44 @@ use crate::runtime::ExtensionRuntime;
 
 pub use folk_core;
 
-/// Global registry for plugin method calls.
 static REGISTRY: OnceLock<Arc<InProcessRegistry>> = OnceLock::new();
-
-/// Tokio handle for blocking calls from PHP thread.
 static TOKIO_HANDLE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+
+/// Pending worker channels (rx sides) for forked processes to pick up.
+static PENDING_WORKERS: OnceLock<
+    Mutex<Vec<(mpsc::Receiver<bridge::TaskRequest>, oneshot::Sender<()>)>>,
+> = OnceLock::new();
 
 // --- Public Rust API ---
 
-/// Return the extension version string.
 pub fn version() -> String {
     format!("folk-ext {}", env!("CARGO_PKG_VERSION"))
 }
 
 /// Start the server with plugins. Non-blocking.
 ///
-/// Creates channels for the main thread worker, starts tokio in a background
-/// thread, returns immediately. The caller should then enter the worker loop
-/// via `bridge::do_ready()`, `bridge::do_recv()`, `bridge::do_send()`.
+/// Creates `config.workers.count` channel pairs. The first worker's channels
+/// are installed for the current process. Additional channels are stored in
+/// PENDING_WORKERS for forked children to claim via `claim_worker_channel()`.
 pub fn start_server(config: FolkConfig, plugins: Vec<Box<dyn Plugin>>) -> anyhow::Result<()> {
-    let (task_tx, task_rx) = mpsc::channel::<bridge::TaskRequest>(8);
-    let (ready_tx, ready_rx) = oneshot::channel::<()>();
+    let worker_count = config.workers.count;
 
-    bridge::init_worker_state(1, task_rx, ready_tx);
+    let mut tx_sides = Vec::with_capacity(worker_count);
+    let mut rx_sides = Vec::with_capacity(worker_count);
+
+    for _ in 0..worker_count {
+        let (task_tx, task_rx) = mpsc::channel::<bridge::TaskRequest>(8);
+        let (ready_tx, ready_rx) = oneshot::channel::<()>();
+        tx_sides.push((task_tx, ready_rx));
+        rx_sides.push((task_rx, ready_tx));
+    }
+
+    // First worker: current process.
+    let (first_rx, first_ready_tx) = rx_sides.remove(0);
+    bridge::init_worker_state(1, first_rx, first_ready_tx);
+
+    // Remaining workers: stored for forked children.
+    PENDING_WORKERS.set(Mutex::new(rx_sides)).ok();
 
     let registry = InProcessRegistry::new();
     REGISTRY.set(registry.clone()).ok();
@@ -68,8 +78,7 @@ pub fn start_server(config: FolkConfig, plugins: Vec<Box<dyn Plugin>>) -> anyhow
             TOKIO_HANDLE.set(rt.handle().clone()).ok();
 
             rt.block_on(async move {
-                let ext_runtime =
-                    Arc::new(ExtensionRuntime::new(workers_config, task_tx, ready_rx));
+                let ext_runtime = Arc::new(ExtensionRuntime::new(workers_config, tx_sides));
 
                 let mut server = folk_core::server::FolkServer::new(config, ext_runtime);
                 server.set_rpc_registrar(registry);
@@ -85,11 +94,25 @@ pub fn start_server(config: FolkConfig, plugins: Vec<Box<dyn Plugin>>) -> anyhow
         })?;
 
     std::thread::sleep(std::time::Duration::from_millis(100));
-    info!("folk server started in background, main thread is the worker");
+    info!(
+        worker_count,
+        "folk server started, main process is worker #1"
+    );
     Ok(())
 }
 
-/// Call a registered plugin method (in-process). Blocks until result.
+/// Claim the next pending worker channel (for forked children).
+/// Returns the worker_id, or None if no more channels.
+pub fn claim_worker_channel() -> Option<u32> {
+    static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(2);
+
+    let pending = PENDING_WORKERS.get()?;
+    let (rx, ready_tx) = pending.lock().ok()?.pop()?;
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    bridge::init_worker_state(id, rx, ready_tx);
+    Some(id)
+}
+
 pub fn call_method(method: &str, payload: bytes::Bytes) -> anyhow::Result<bytes::Bytes> {
     let registry = REGISTRY
         .get()
@@ -101,9 +124,7 @@ pub fn call_method(method: &str, payload: bytes::Bytes) -> anyhow::Result<bytes:
     handle.block_on(registry.call(method, payload))
 }
 
-// --- PHP wrappers (standalone mode only — when folk-ext IS the extension) ---
-// When used as rlib by folk-builder, these are NOT compiled to avoid
-// duplicate `get_module` symbols.
+// --- PHP wrappers (standalone mode only) ---
 
 #[cfg(feature = "standalone")]
 #[php_class]
@@ -180,6 +201,14 @@ pub fn folk_worker_send_error(message: String) -> PhpResult<()> {
         .map_err(|e| PhpException::default(format!("folk_worker_send_error: {e}")))
 }
 
+/// Claim a worker channel for a forked child process.
+/// Returns the worker ID, or null if no more workers available.
+#[cfg(feature = "standalone")]
+#[php_function]
+pub fn folk_claim_worker() -> Option<i64> {
+    claim_worker_channel().map(i64::from)
+}
+
 #[cfg(feature = "standalone")]
 #[php_module]
 pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
@@ -191,4 +220,5 @@ pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
         .function(wrap_function!(folk_worker_recv))
         .function(wrap_function!(folk_worker_send))
         .function(wrap_function!(folk_worker_send_error))
+        .function(wrap_function!(folk_claim_worker))
 }
