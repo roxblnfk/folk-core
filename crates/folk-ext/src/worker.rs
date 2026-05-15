@@ -29,7 +29,11 @@ pub fn spawn_zts_worker(
     thread::Builder::new()
         .name(format!("folk-worker-{worker_id}"))
         .spawn(move || {
-            run_zts_worker(worker_id, &script, task_rx, ready_tx);
+            if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_zts_worker(worker_id, &script, task_rx, ready_tx);
+            })) {
+                error!(worker_id, "ZTS worker thread panicked: {e:?}");
+            }
         })
         .expect("failed to spawn worker thread")
 }
