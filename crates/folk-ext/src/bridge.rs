@@ -6,14 +6,13 @@
 use std::cell::RefCell;
 use std::sync::mpsc;
 
-use bytes::Bytes;
 use tracing::debug;
 
 /// A request sent from the server to a worker thread.
 pub struct TaskRequest {
     pub method: String,
-    pub payload: Bytes,
-    pub reply: mpsc::SyncSender<anyhow::Result<Bytes>>,
+    pub payload: serde_json::Value,
+    pub reply: mpsc::SyncSender<anyhow::Result<serde_json::Value>>,
 }
 
 /// Thread-local state for the current worker.
@@ -21,7 +20,7 @@ struct WorkerState {
     worker_id: u32,
     task_rx: mpsc::Receiver<TaskRequest>,
     ready_tx: Option<mpsc::SyncSender<()>>,
-    current_reply: Option<mpsc::SyncSender<anyhow::Result<Bytes>>>,
+    current_reply: Option<mpsc::SyncSender<anyhow::Result<serde_json::Value>>>,
 }
 
 thread_local! {
@@ -72,7 +71,10 @@ pub fn do_ready() -> Result<bool, &'static str> {
     })
 }
 
-/// Block until a request arrives. Returns `(method, payload_bytes)` or `None` on shutdown.
+/// Block until a request arrives. Returns `(method, payload_json_bytes)` or `None` on shutdown.
+///
+/// Internally receives `serde_json::Value` from the channel and serializes to JSON bytes
+/// for PHP consumption. PHP calls `json_decode()` on these bytes.
 pub fn do_recv() -> Result<Option<(String, Vec<u8>)>, &'static str> {
     WORKER.with(|w| {
         let mut state = w.borrow_mut();
@@ -80,9 +82,10 @@ pub fn do_recv() -> Result<Option<(String, Vec<u8>)>, &'static str> {
 
         if let Ok(req) = state.task_rx.recv() {
             let method = req.method.clone();
-            let payload = req.payload.to_vec();
+            // Value → JSON bytes for PHP (only serialization on the hot path)
+            let payload_bytes = serde_json::to_vec(&req.payload).unwrap_or_default();
             state.current_reply = Some(req.reply);
-            Ok(Some((method, payload)))
+            Ok(Some((method, payload_bytes)))
         } else {
             debug!(worker_id = state.worker_id, "recv: channel closed");
             Ok(None)
@@ -90,14 +93,20 @@ pub fn do_recv() -> Result<Option<(String, Vec<u8>)>, &'static str> {
     })
 }
 
-/// Send a successful response (raw bytes).
-pub fn do_send(data: Vec<u8>) -> Result<(), &'static str> {
+/// Send a successful response (raw JSON bytes from PHP).
+///
+/// Internally deserializes JSON bytes from PHP into `serde_json::Value`
+/// for zero-copy return through the channel.
+pub fn do_send(data: &[u8]) -> Result<(), &'static str> {
     WORKER.with(|w| {
         let mut state = w.borrow_mut();
         let state = state.as_mut().ok_or("not in a worker thread")?;
 
         let reply = state.current_reply.take().ok_or("no pending request")?;
-        let _ = reply.send(Ok(Bytes::from(data)));
+        // JSON bytes → Value (only deserialization on the hot path)
+        let value: serde_json::Value =
+            serde_json::from_slice(data).unwrap_or(serde_json::Value::Null);
+        let _ = reply.send(Ok(value));
         Ok(())
     })
 }

@@ -35,8 +35,8 @@ pub enum WorkError {
 /// One dispatch request: method name, payload + reply channel.
 struct DispatchRequest {
     method: String,
-    payload: Bytes,
-    reply: oneshot::Sender<Result<Bytes>>,
+    payload: serde_json::Value,
+    reply: oneshot::Sender<Result<serde_json::Value>>,
 }
 
 /// Worker pool — the dispatch surface.
@@ -63,16 +63,13 @@ impl WorkerPool {
             _pool_task: pool_task,
         }))
     }
-}
 
-#[async_trait]
-impl Executor for WorkerPool {
-    async fn execute_method(&self, method: &str, payload: Bytes) -> Result<Bytes> {
-        debug!(
-            method,
-            payload_len = payload.len(),
-            "pool: execute_method called"
-        );
+    /// Dispatch a Value-based request through the pool.
+    async fn dispatch_value(
+        &self,
+        method: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let permit = self
             .semaphore
             .clone()
@@ -96,6 +93,32 @@ impl Executor for WorkerPool {
 
         drop(permit);
         result
+    }
+}
+
+#[async_trait]
+impl Executor for WorkerPool {
+    async fn execute_method(&self, method: &str, payload: Bytes) -> Result<Bytes> {
+        debug!(
+            method,
+            payload_len = payload.len(),
+            "pool: execute_method called (bytes path)"
+        );
+        // Legacy path: parse JSON bytes → Value → dispatch → Value → serialize
+        let value: serde_json::Value =
+            serde_json::from_slice(&payload).context("pool: failed to parse payload as JSON")?;
+        let result = self.dispatch_value(method, value).await?;
+        let bytes = serde_json::to_vec(&result).context("pool: failed to serialize response")?;
+        Ok(Bytes::from(bytes))
+    }
+
+    async fn execute_value(
+        &self,
+        method: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        debug!(method, "pool: execute_value called (zero-copy path)");
+        self.dispatch_value(method, payload).await
     }
 }
 
@@ -223,9 +246,9 @@ async fn boot_worker(
 async fn dispatch_one(
     worker: &mut dyn WorkerHandle,
     method: &str,
-    payload: Bytes,
+    payload: serde_json::Value,
     exec_timeout: Duration,
-) -> Result<Bytes, WorkError> {
+) -> Result<serde_json::Value, WorkError> {
     let recv = tokio::time::timeout(exec_timeout, worker.execute(method, payload));
     match recv.await {
         Ok(Ok(result)) => Ok(result),

@@ -8,6 +8,7 @@ pub mod registry;
 pub mod runtime;
 pub mod worker;
 pub mod zts;
+pub mod zval_convert;
 
 use std::sync::{Arc, OnceLock};
 use std::thread;
@@ -177,7 +178,7 @@ pub fn folk_worker_recv() -> PhpResult<Option<Vec<Binary<u8>>>> {
 #[php_function]
 pub fn folk_worker_send(result: Binary<u8>) -> PhpResult<()> {
     let data: Vec<u8> = result.into();
-    bridge::do_send(data).map_err(|e| PhpException::default(format!("folk_worker_send: {e}")))
+    bridge::do_send(&data).map_err(|e| PhpException::default(format!("folk_worker_send: {e}")))
 }
 
 #[cfg(feature = "standalone")]

@@ -1,5 +1,5 @@
-use bytes::Bytes;
 use folk_core::runtime::{MockRuntime, Runtime};
+use serde_json::json;
 
 #[tokio::test]
 async fn mock_runtime_echoes_request() {
@@ -10,7 +10,7 @@ async fn mock_runtime_echoes_request() {
     worker.ready().await.unwrap();
 
     // Execute should echo the payload back.
-    let payload = Bytes::from_static(b"hello");
+    let payload = json!({"hello": "world"});
     let result = worker.execute("test", payload.clone()).await.unwrap();
     assert_eq!(result, payload);
 }
@@ -22,6 +22,6 @@ async fn mock_worker_refuses_after_terminate() {
     worker.ready().await.unwrap();
     worker.terminate().await.unwrap();
 
-    let result = worker.execute("test", Bytes::from_static(b"hi")).await;
+    let result = worker.execute("test", json!("hi")).await;
     assert!(result.is_err());
 }

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use bytes::Bytes;
 use folk_api::Executor;
 use folk_core::config::WorkersConfig;
 use folk_core::runtime::MockRuntime;
 use folk_core::worker_pool::WorkerPool;
+use serde_json::json;
 
 #[tokio::test]
 async fn execute_round_trips_through_mock_runtime() {
@@ -19,9 +19,10 @@ async fn execute_round_trips_through_mock_runtime() {
     // Wait a bit for workers to boot
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    let payload = rmp_serde::to_vec(&"hello").unwrap();
-    let response = pool.execute(Bytes::from(payload)).await.unwrap();
-
-    let decoded: String = rmp_serde::from_slice(&response).unwrap();
-    assert_eq!(decoded, "hello");
+    let payload = json!({"msg": "hello"});
+    let response = pool
+        .execute_value("dispatch", payload.clone())
+        .await
+        .unwrap();
+    assert_eq!(response, payload);
 }

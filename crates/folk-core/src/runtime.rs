@@ -9,7 +9,6 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use bytes::Bytes;
 
 /// A handle to a spawned worker.
 ///
@@ -24,8 +23,12 @@ pub trait WorkerHandle: Send + 'static {
     /// Returns once the worker has booted and is ready to accept requests.
     async fn ready(&mut self) -> Result<()>;
 
-    /// Execute a single request: send method + payload, receive result.
-    async fn execute(&mut self, method: &str, payload: Bytes) -> Result<Bytes>;
+    /// Execute a single request: send structured data, receive result.
+    async fn execute(
+        &mut self,
+        method: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value>;
 
     /// Terminate the worker. Implementations should signal shutdown and
     /// wait for the worker to exit.
@@ -43,7 +46,8 @@ pub trait Runtime: Send + Sync + 'static {
 
 // --- MockRuntime: in-memory runtime for tests ---
 
-type MockResponder = std::sync::Arc<dyn Fn(&str, &Bytes) -> Result<Bytes> + Send + Sync>;
+type MockResponder =
+    std::sync::Arc<dyn Fn(&str, &serde_json::Value) -> Result<serde_json::Value> + Send + Sync>;
 
 /// In-memory runtime used in tests. Each spawned worker echoes requests back.
 pub struct MockRuntime {
@@ -92,7 +96,11 @@ impl WorkerHandle for MockWorker {
         Ok(())
     }
 
-    async fn execute(&mut self, method: &str, payload: Bytes) -> Result<Bytes> {
+    async fn execute(
+        &mut self,
+        method: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         if self.terminated {
             anyhow::bail!("worker terminated");
         }

@@ -12,7 +12,6 @@ use std::sync::mpsc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use bytes::Bytes;
 use folk_core::config::WorkersConfig;
 use folk_core::runtime::{Runtime, WorkerHandle};
 use tracing::debug;
@@ -124,7 +123,11 @@ impl WorkerHandle for ChannelWorkerHandle {
         Ok(())
     }
 
-    async fn execute(&mut self, method: &str, payload: Bytes) -> Result<Bytes> {
+    async fn execute(
+        &mut self,
+        method: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let tx = self
             .task_tx
             .as_ref()
