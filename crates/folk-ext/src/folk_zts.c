@@ -58,20 +58,24 @@ int folk_zts_execute_script(const char *filename) {
     return ret;
 }
 
-/* Call a PHP function by name with an array argument.
- * Returns 0 (SUCCESS) or -1 (FAILURE).
+/* Call a PHP function by name with two arguments (method string + params array).
+ * Returns 0 (SUCCESS) or non-zero (FAILURE).
  * retval must point to a valid zval (will be overwritten). */
-int folk_zts_call_function(const char *func_name, zval *arg, zval *retval) {
+int folk_zts_call_dispatch(const char *func_name, zval *method_zval, zval *params_zval, zval *retval) {
     zval fname;
     ZVAL_STRING(&fname, func_name);
+
+    zval args[2];
+    ZVAL_COPY_VALUE(&args[0], method_zval);
+    ZVAL_COPY_VALUE(&args[1], params_zval);
 
     int result = call_user_function(
         CG(function_table),
         NULL,
         &fname,
         retval,
-        1,
-        arg
+        2,
+        args
     );
 
     zval_ptr_dtor(&fname);

@@ -111,6 +111,56 @@ pub fn do_send(data: &[u8]) -> Result<(), &'static str> {
     })
 }
 
+/// Run the dispatch loop directly from Rust, calling PHP via `call_user_function`.
+///
+/// This is the zero-copy path: `serde_json::Value` → zval → PHP handler → zval → Value.
+/// No JSON encode/decode at all.
+///
+/// `dispatch_fn` is the name of a PHP function with signature:
+/// `function(string $method, array $params): array`
+pub fn run_dispatch_loop(dispatch_fn: &str) -> Result<(), &'static str> {
+    WORKER.with(|w| {
+        // Signal ready first.
+        {
+            let mut state = w.borrow_mut();
+            let state = state.as_mut().ok_or("not in a worker thread")?;
+            if let Some(tx) = state.ready_tx.take() {
+                let _ = tx.send(());
+                debug!(
+                    worker_id = state.worker_id,
+                    "worker signaled ready (dispatch loop)"
+                );
+            }
+        }
+
+        // Main dispatch loop.
+        loop {
+            let req = {
+                let mut state = w.borrow_mut();
+                let state = state.as_mut().ok_or("not in a worker thread")?;
+                if let Ok(req) = state.task_rx.recv() {
+                    req
+                } else {
+                    debug!(worker_id = state.worker_id, "dispatch loop: channel closed");
+                    return Ok(());
+                }
+            };
+
+            // Call PHP handler directly: Value → zval → PHP → zval → Value.
+            let result = crate::zts::call_dispatch(dispatch_fn, &req.method, &req.payload);
+
+            match result {
+                Ok(value) => {
+                    let _ = req.reply.send(Ok(value));
+                },
+                Err(e) => {
+                    let _ = req.reply.send(Err(e));
+                },
+            }
+        }
+    })
+}
+
 /// Send an error response.
 pub fn do_send_error(message: &str) -> Result<(), &'static str> {
     WORKER.with(|w| {

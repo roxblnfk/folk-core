@@ -197,6 +197,21 @@ pub fn folk_is_worker_thread() -> bool {
     bridge::has_worker_state()
 }
 
+/// Run the zero-copy dispatch loop.
+///
+/// Blocks until the channel is closed (server shutdown). Calls the named
+/// PHP function directly for each request — no JSON encode/decode.
+///
+/// The PHP function must have signature:
+/// `function(string $method, array $params): array`
+#[cfg(feature = "standalone")]
+#[php_function]
+#[allow(clippy::needless_pass_by_value)]
+pub fn folk_worker_run(dispatch_fn: String) -> PhpResult<()> {
+    bridge::run_dispatch_loop(&dispatch_fn)
+        .map_err(|e| PhpException::default(format!("folk_worker_run: {e}")))
+}
+
 #[cfg(feature = "standalone")]
 #[php_module]
 pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
@@ -209,4 +224,5 @@ pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
         .function(wrap_function!(folk_worker_send))
         .function(wrap_function!(folk_worker_send_error))
         .function(wrap_function!(folk_is_worker_thread))
+        .function(wrap_function!(folk_worker_run))
 }

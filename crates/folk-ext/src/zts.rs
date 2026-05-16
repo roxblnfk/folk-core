@@ -6,12 +6,20 @@
 
 use std::ffi::{CString, c_int};
 
+use ext_php_rs::types::Zval;
+
 unsafe extern "C" {
     fn folk_zts_thread_init();
     fn folk_zts_thread_shutdown();
     fn folk_zts_request_startup() -> c_int;
     fn folk_zts_request_shutdown();
     fn folk_zts_execute_script(filename: *const std::ffi::c_char) -> c_int;
+    fn folk_zts_call_dispatch(
+        func_name: *const std::ffi::c_char,
+        method_zval: *mut Zval,
+        params_zval: *mut Zval,
+        retval: *mut Zval,
+    ) -> c_int;
     fn folk_zts_is_enabled() -> c_int;
 }
 
@@ -74,9 +82,6 @@ pub fn request_shutdown() {
 
 /// Execute a PHP script on the current thread.
 ///
-/// The thread must have TSRM context (via [`ZtsThreadGuard`]) and
-/// an active request (via [`request_startup`]).
-///
 /// # Errors
 /// Returns error if the script fails to execute.
 pub fn execute_script(filename: &str) -> anyhow::Result<()> {
@@ -88,4 +93,44 @@ pub fn execute_script(filename: &str) -> anyhow::Result<()> {
     } else {
         anyhow::bail!("php_execute_script failed for {filename}")
     }
+}
+
+/// Call a named PHP function with (method, params) arguments.
+///
+/// Used to call the dispatch function registered by the PHP worker script.
+/// Returns the PHP function's return value as a `serde_json::Value`.
+///
+/// # Errors
+/// Returns error if the function call fails.
+pub fn call_dispatch(
+    func_name: &str,
+    method: &str,
+    params: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let c_func =
+        CString::new(func_name).map_err(|_| anyhow::anyhow!("func_name contains null byte"))?;
+
+    // Convert method and params to Zvals.
+    let mut method_zval = Zval::new();
+    method_zval
+        .set_string(method, false)
+        .map_err(|e| anyhow::anyhow!("set_string failed: {e}"))?;
+
+    let mut params_zval = crate::zval_convert::value_to_zval(params);
+    let mut retval = Zval::new();
+
+    let ret = unsafe {
+        folk_zts_call_dispatch(
+            c_func.as_ptr(),
+            &raw mut method_zval,
+            &raw mut params_zval,
+            &raw mut retval,
+        )
+    };
+
+    if ret != 0 {
+        anyhow::bail!("call_user_function({func_name}) failed (code {ret})");
+    }
+
+    Ok(crate::zval_convert::zval_to_value(&retval))
 }
