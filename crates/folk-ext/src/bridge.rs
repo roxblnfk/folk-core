@@ -142,6 +142,9 @@ pub fn run_dispatch_loop(dispatch_fn: &str) -> Result<(), &'static str> {
                     req
                 } else {
                     debug!(worker_id = state.worker_id, "dispatch loop: channel closed");
+                    // Wait for ZTS worker threads to finish before main thread exits.
+                    // This prevents SIGSEGV from php_module_shutdown racing with workers.
+                    crate::join_zts_workers();
                     return Ok(());
                 }
             };

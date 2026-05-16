@@ -52,7 +52,8 @@ impl ExtensionRuntime {
         let (task_tx, task_rx) = mpsc::sync_channel::<bridge::TaskRequest>(8);
         let (ready_tx, ready_rx) = mpsc::sync_channel::<()>(1);
 
-        let _handle = worker::spawn_zts_worker(worker_id, script.to_string(), task_rx, ready_tx);
+        let handle = worker::spawn_zts_worker(worker_id, script.to_string(), task_rx, ready_tx);
+        crate::register_zts_worker(handle);
 
         debug!(worker_id, "ZTS worker thread spawned");
 

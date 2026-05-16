@@ -10,7 +10,7 @@ pub mod worker;
 pub mod zts;
 pub mod zval_convert;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use ext_php_rs::binary::Binary;
@@ -26,6 +26,26 @@ pub use folk_core;
 
 static REGISTRY: OnceLock<Arc<InProcessRegistry>> = OnceLock::new();
 static TOKIO_HANDLE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+
+/// ZTS worker thread handles — joined on shutdown to prevent SIGSEGV.
+static ZTS_WORKERS: OnceLock<Mutex<Vec<thread::JoinHandle<()>>>> = OnceLock::new();
+
+/// Register a ZTS worker thread handle for graceful shutdown.
+pub fn register_zts_worker(handle: thread::JoinHandle<()>) {
+    let workers = ZTS_WORKERS.get_or_init(|| Mutex::new(Vec::new()));
+    workers.lock().unwrap().push(handle);
+}
+
+/// Join all ZTS worker threads. Called before main thread exits.
+pub fn join_zts_workers() {
+    if let Some(workers) = ZTS_WORKERS.get() {
+        let handles: Vec<_> = workers.lock().unwrap().drain(..).collect();
+        for handle in handles {
+            let _ = handle.join();
+        }
+        tracing::info!("all ZTS worker threads joined");
+    }
+}
 
 // --- Public Rust API ---
 
