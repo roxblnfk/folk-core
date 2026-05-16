@@ -66,8 +66,8 @@ int folk_zts_call_dispatch(const char *func_name, zval *method_zval, zval *param
     ZVAL_STRING(&fname, func_name);
 
     zval args[2];
-    ZVAL_COPY_VALUE(&args[0], method_zval);
-    ZVAL_COPY_VALUE(&args[1], params_zval);
+    ZVAL_COPY(&args[0], method_zval);
+    ZVAL_COPY(&args[1], params_zval);
 
     int result = call_user_function(
         CG(function_table),
@@ -78,6 +78,9 @@ int folk_zts_call_dispatch(const char *func_name, zval *method_zval, zval *param
         args
     );
 
+    /* Clean up our copies (decrements refcount). */
+    zval_ptr_dtor(&args[0]);
+    zval_ptr_dtor(&args[1]);
     zval_ptr_dtor(&fname);
     return result;
 }

@@ -5,7 +5,8 @@
 //! - **Multi-worker (ZTS):** Additional worker threads spawned from Rust,
 //!   each with its own PHP context via TSRM.
 //!
-//! Uses `std::sync` channels so worker threads don't need a tokio runtime.
+//! Uses `std::sync::mpsc` for task dispatch (worker thread blocks on recv).
+//! Uses `tokio::sync::oneshot` for reply (no blocking on tokio side).
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
@@ -84,8 +85,6 @@ impl ExtensionRuntime {
 #[async_trait]
 impl Runtime for ExtensionRuntime {
     async fn spawn(&self) -> Result<Box<dyn WorkerHandle>> {
-        // Try pre-connected channels first (main thread worker).
-        // If none left, spawn a ZTS worker thread.
         let has_preconnected = !self.channels.lock().unwrap().is_empty();
 
         if has_preconnected {
@@ -98,9 +97,7 @@ impl Runtime for ExtensionRuntime {
     }
 }
 
-/// Handle connected to a worker via `std::sync` channels.
-///
-/// Works for both main-thread (NTS) and ZTS worker threads.
+/// Handle connected to a worker via channels.
 pub struct ChannelWorkerHandle {
     worker_id: u32,
     task_tx: Option<mpsc::SyncSender<bridge::TaskRequest>>,
@@ -115,7 +112,6 @@ impl WorkerHandle for ChannelWorkerHandle {
 
     async fn ready(&mut self) -> Result<()> {
         if let Some(rx) = self.ready_rx.take() {
-            // Block in spawn_blocking to avoid blocking the tokio runtime.
             tokio::task::spawn_blocking(move || rx.recv())
                 .await
                 .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))?
@@ -137,22 +133,22 @@ impl WorkerHandle for ChannelWorkerHandle {
 
         let method = method.to_string();
 
-        // Use spawn_blocking for the reply recv to avoid blocking tokio.
-        tokio::task::spawn_blocking(move || {
-            let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-            tx.send(bridge::TaskRequest {
-                method,
-                payload,
-                reply: reply_tx,
-            })
-            .map_err(|_| anyhow::anyhow!("worker process gone"))?;
+        // tokio oneshot for reply — send() is lock-free, recv() is async.
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
 
-            reply_rx
-                .recv()
-                .map_err(|_| anyhow::anyhow!("worker dropped reply"))?
+        // SyncSender::send blocks only when channel is full (capacity=8).
+        // With semaphore=4, at most 4 in-flight — never blocks.
+        tx.send(bridge::TaskRequest {
+            method,
+            payload,
+            reply: reply_tx,
         })
-        .await
-        .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))?
+        .map_err(|_| anyhow::anyhow!("worker process gone"))?;
+
+        // Await reply asynchronously — no spawn_blocking needed!
+        reply_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("worker dropped reply"))?
     }
 
     async fn terminate(&mut self) -> Result<()> {

@@ -12,7 +12,9 @@ use tracing::debug;
 pub struct TaskRequest {
     pub method: String,
     pub payload: serde_json::Value,
-    pub reply: mpsc::SyncSender<anyhow::Result<serde_json::Value>>,
+    /// Reply channel. Uses `tokio::sync::oneshot` which does NOT require
+    /// a tokio runtime to send — it's a pure atomic operation.
+    pub reply: tokio::sync::oneshot::Sender<anyhow::Result<serde_json::Value>>,
 }
 
 /// Thread-local state for the current worker.
@@ -20,7 +22,7 @@ struct WorkerState {
     worker_id: u32,
     task_rx: mpsc::Receiver<TaskRequest>,
     ready_tx: Option<mpsc::SyncSender<()>>,
-    current_reply: Option<mpsc::SyncSender<anyhow::Result<serde_json::Value>>>,
+    current_reply: Option<tokio::sync::oneshot::Sender<anyhow::Result<serde_json::Value>>>,
 }
 
 thread_local! {
