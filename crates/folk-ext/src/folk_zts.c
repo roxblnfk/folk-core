@@ -49,12 +49,29 @@ void folk_zts_request_shutdown(void) {
 }
 
 /* Execute a PHP script file on the current thread.
+ * Skips the shebang line (#!/...) if present — CLI SAPI does this
+ * automatically but ZTS worker threads use the embed context where
+ * shebang stripping is not performed.
  * Returns 0 (SUCCESS) or -1 (FAILURE). */
 int folk_zts_execute_script(const char *filename) {
+    FILE *fp = fopen(filename, "rb");
+    if (!fp) return 0;
+
+    /* Skip shebang line if present. */
+    int c1 = fgetc(fp);
+    int c2 = fgetc(fp);
+    if (c1 == '#' && c2 == '!') {
+        int c;
+        while ((c = fgetc(fp)) != EOF && c != '\n') {}
+    } else {
+        rewind(fp);
+    }
+
     zend_file_handle file_handle;
-    zend_stream_init_filename(&file_handle, filename);
+    zend_stream_init_fp(&file_handle, fp, filename);
     int ret = php_execute_script(&file_handle);
     zend_destroy_file_handle(&file_handle);
+    /* fp is closed by zend_destroy_file_handle */
     return ret;
 }
 

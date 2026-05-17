@@ -48,12 +48,18 @@ impl ExtensionRuntime {
     #[allow(clippy::unnecessary_wraps)] // Result for consistency with Runtime trait
     fn spawn_zts_worker(&self) -> Result<Box<dyn WorkerHandle>> {
         let worker_id = NEXT_WORKER_ID.fetch_add(1, Ordering::Relaxed);
-        let script = &self.config.script;
+        // ZTS threads may have a different CWD after php_request_startup(),
+        // so resolve to absolute path before spawning.
+        let script = std::env::current_dir()
+            .unwrap_or_default()
+            .join(&self.config.script)
+            .to_string_lossy()
+            .into_owned();
 
         let (task_tx, task_rx) = mpsc::sync_channel::<bridge::TaskRequest>(8);
         let (ready_tx, ready_rx) = mpsc::sync_channel::<()>(1);
 
-        let handle = worker::spawn_zts_worker(worker_id, script.to_string(), task_rx, ready_tx);
+        let handle = worker::spawn_zts_worker(worker_id, script, task_rx, ready_tx);
         crate::register_zts_worker(handle);
 
         debug!(worker_id, "ZTS worker thread spawned");
