@@ -206,6 +206,12 @@ async fn slot_supervisor(
 
         // Recycle?
         if slot.should_recycle(&config) {
+            if let Some(ref w) = worker {
+                if !w.is_recyclable() {
+                    debug!(slot_id, "skipping recycle for non-recyclable worker");
+                    continue;
+                }
+            }
             info!(slot_id, jobs = slot.jobs_handled, "recycling worker");
             if let Some(mut w) = worker.take() {
                 let _ = w.terminate().await;

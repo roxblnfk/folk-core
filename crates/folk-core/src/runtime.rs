@@ -33,6 +33,12 @@ pub trait WorkerHandle: Send + 'static {
     /// Terminate the worker. Implementations should signal shutdown and
     /// wait for the worker to exit.
     async fn terminate(&mut self) -> Result<()>;
+
+    /// Whether this worker can be recycled (terminated and respawned).
+    /// Returns `false` for the main thread worker which cannot be restarted.
+    fn is_recyclable(&self) -> bool {
+        true
+    }
 }
 
 /// Spawns workers per a runtime-specific strategy.

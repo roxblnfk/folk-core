@@ -10,6 +10,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
+use std::thread;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -59,8 +60,7 @@ impl ExtensionRuntime {
         let (task_tx, task_rx) = mpsc::sync_channel::<bridge::TaskRequest>(8);
         let (ready_tx, ready_rx) = mpsc::sync_channel::<()>(1);
 
-        let handle = worker::spawn_zts_worker(worker_id, script, task_rx, ready_tx);
-        crate::register_zts_worker(handle);
+        let thread_handle = worker::spawn_zts_worker(worker_id, script, task_rx, ready_tx);
 
         debug!(worker_id, "ZTS worker thread spawned");
 
@@ -68,6 +68,7 @@ impl ExtensionRuntime {
             worker_id,
             task_tx: Some(task_tx),
             ready_rx: Some(ready_rx),
+            thread_handle: Some(thread_handle),
         }))
     }
 
@@ -84,6 +85,7 @@ impl ExtensionRuntime {
             worker_id,
             task_tx: Some(tx_side.task_tx),
             ready_rx: Some(tx_side.ready_rx),
+            thread_handle: None, // main thread — not managed by us
         }))
     }
 }
@@ -108,6 +110,7 @@ pub struct ChannelWorkerHandle {
     worker_id: u32,
     task_tx: Option<mpsc::SyncSender<bridge::TaskRequest>>,
     ready_rx: Option<mpsc::Receiver<()>>,
+    thread_handle: Option<thread::JoinHandle<()>>,
 }
 
 #[async_trait]
@@ -158,7 +161,23 @@ impl WorkerHandle for ChannelWorkerHandle {
     }
 
     async fn terminate(&mut self) -> Result<()> {
+        // Close channel — dispatch loop will exit.
         self.task_tx.take();
+
+        // Wait for ZTS thread to finish PHP cleanup (ts_free_thread etc).
+        if let Some(handle) = self.thread_handle.take() {
+            tokio::task::spawn_blocking(move || {
+                let _ = handle.join();
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))?;
+        }
+
         Ok(())
+    }
+
+    fn is_recyclable(&self) -> bool {
+        // Main thread (preconnected) cannot be recycled — it IS the PHP process.
+        self.thread_handle.is_some()
     }
 }
