@@ -4,6 +4,7 @@
 //! environment-variable overrides via the `FOLK_` prefix (e.g.,
 //! `FOLK_WORKERS_COUNT=8`).
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -86,6 +87,11 @@ pub struct LogConfig {
     pub filter: String,
     /// Output format: `text`, `json`, or `pretty`.
     pub format: LogFormat,
+    /// Per-plugin log level overrides.
+    /// Keys: `http`, `jobs`, `grpc`, `metrics`, `process`, `core`, `ext`.
+    /// Values: `trace`, `debug`, `info`, `warn`, `error`.
+    #[serde(default)]
+    pub plugins: HashMap<String, String>,
 }
 
 impl Default for LogConfig {
@@ -93,7 +99,39 @@ impl Default for LogConfig {
         Self {
             filter: "info".into(),
             format: LogFormat::Text,
+            plugins: HashMap::new(),
         }
+    }
+}
+
+impl LogConfig {
+    /// Build the effective `EnvFilter` string by combining `filter` with
+    /// per-plugin overrides. Friendly plugin names are mapped to Rust crate
+    /// targets automatically.
+    pub fn effective_filter(&self) -> String {
+        if self.plugins.is_empty() {
+            return self.filter.clone();
+        }
+
+        let mut parts = vec![self.filter.clone()];
+        for (plugin, level) in &self.plugins {
+            let target = plugin_name_to_target(plugin);
+            parts.push(format!("{target}={level}"));
+        }
+        parts.join(",")
+    }
+}
+
+fn plugin_name_to_target(name: &str) -> &str {
+    match name {
+        "http" => "folk_plugin_http",
+        "jobs" => "folk_plugin_jobs",
+        "grpc" => "folk_plugin_grpc",
+        "metrics" => "folk_plugin_metrics",
+        "process" => "folk_plugin_process",
+        "core" => "folk_core",
+        "ext" => "folk_ext",
+        _ => name,
     }
 }
 
