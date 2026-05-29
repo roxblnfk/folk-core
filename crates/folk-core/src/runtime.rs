@@ -48,6 +48,12 @@ pub trait Runtime: Send + Sync + 'static {
     ///
     /// The caller must call `ready()` before dispatching requests.
     async fn spawn(&self) -> Result<Box<dyn WorkerHandle>>;
+
+    /// Warm up shared caches (OPcache) before spawning workers.
+    /// Called once at startup. Default: no-op.
+    async fn warmup(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 // --- MockRuntime: in-memory runtime for tests ---

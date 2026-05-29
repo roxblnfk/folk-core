@@ -102,6 +102,16 @@ int folk_zts_call_dispatch(const char *func_name, zval *method_zval, zval *param
     return result;
 }
 
+/* Evaluate a PHP code string on the current thread.
+ * The code must NOT include the opening <?php tag.
+ * Returns 0 (SUCCESS) or -1 (FAILURE). */
+int folk_zts_eval_string(const char *code) {
+    zval retval;
+    int result = zend_eval_string((char *)code, &retval, "folk-warmup");
+    zval_ptr_dtor(&retval);
+    return (result == SUCCESS) ? 1 : 0;
+}
+
 /* Check if the current PHP build has ZTS enabled. */
 int folk_zts_is_enabled(void) {
 #ifdef ZTS

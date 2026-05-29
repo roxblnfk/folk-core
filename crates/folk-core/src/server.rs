@@ -62,6 +62,13 @@ impl FolkServer {
         let health_registry = HealthRegistryImpl::new();
         let metrics_registry = MetricsRegistryImpl::new();
 
+        if self.config.workers.warmup {
+            match self.runtime.warmup().await {
+                Ok(()) => {},
+                Err(e) => warn!(error = %e, "opcache warmup failed, skipping"),
+            }
+        }
+
         let pool = WorkerPool::new(self.runtime.clone(), self.config.workers.clone())
             .context("failed to start worker pool")?;
 

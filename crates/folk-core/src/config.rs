@@ -63,6 +63,9 @@ pub struct WorkersConfig {
     /// Per-worker boot timeout (waits for `control.ready`).
     #[serde(with = "humantime_serde")]
     pub boot_timeout: Duration,
+    /// Warm up opcache before spawning workers (default: true).
+    /// Loads all files from Composer classmap into shared opcache.
+    pub warmup: bool,
 }
 
 impl Default for WorkersConfig {
@@ -76,6 +79,7 @@ impl Default for WorkersConfig {
             max_memory_mb: 256,
             exec_timeout: Duration::from_secs(30),
             boot_timeout: Duration::from_secs(30),
+            warmup: true,
         }
     }
 }

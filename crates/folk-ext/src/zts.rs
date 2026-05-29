@@ -20,6 +20,7 @@ unsafe extern "C" {
         params_zval: *mut Zval,
         retval: *mut Zval,
     ) -> c_int;
+    fn folk_zts_eval_string(code: *const std::ffi::c_char) -> c_int;
     fn folk_zts_is_enabled() -> c_int;
 }
 
@@ -77,6 +78,22 @@ pub fn request_startup() -> anyhow::Result<()> {
 pub fn request_shutdown() {
     unsafe {
         folk_zts_request_shutdown();
+    }
+}
+
+/// Evaluate a PHP code string on the current thread.
+///
+/// The code must NOT include the opening `<?php` tag.
+///
+/// # Errors
+/// Returns error if evaluation fails.
+pub fn eval_string(code: &str) -> anyhow::Result<()> {
+    let c_code = CString::new(code).map_err(|_| anyhow::anyhow!("code contains null byte"))?;
+    let ret = unsafe { folk_zts_eval_string(c_code.as_ptr()) };
+    if ret != 0 {
+        Ok(())
+    } else {
+        anyhow::bail!("zend_eval_string failed")
     }
 }
 

@@ -11,15 +11,17 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Instant;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use folk_core::config::WorkersConfig;
 use folk_core::runtime::{Runtime, WorkerHandle};
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::bridge;
 use crate::worker;
+use crate::zts;
 
 static NEXT_WORKER_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -102,6 +104,59 @@ impl Runtime for ExtensionRuntime {
         } else {
             anyhow::bail!("no workers available and ZTS multi-worker not requested")
         }
+    }
+
+    async fn warmup(&self) -> Result<()> {
+        if !zts::is_zts() {
+            debug!("opcache warmup: skipping (NTS mode)");
+            return Ok(());
+        }
+
+        let project_dir = std::env::current_dir().unwrap_or_default();
+        let classmap_path = project_dir.join("vendor/composer/autoload_classmap.php");
+
+        if !classmap_path.exists() {
+            warn!("opcache warmup: vendor/composer/autoload_classmap.php not found, skipping");
+            return Ok(());
+        }
+
+        let classmap_path_str = classmap_path.to_string_lossy().into_owned();
+        let warmup_code = format!(
+            r"
+$classmap = require '{classmap_path_str}';
+$loaded = 0;
+foreach ($classmap as $class => $file) {{
+    if (is_file($file) && function_exists('opcache_compile_file')) {{
+        @opcache_compile_file($file);
+        $loaded++;
+    }}
+}}
+"
+        );
+
+        let start = Instant::now();
+
+        // Run warmup in a dedicated thread (ZTS requires thread-local TSRM context).
+        let result = tokio::task::spawn_blocking(move || {
+            let _guard = zts::ZtsThreadGuard::new();
+            zts::request_startup()?;
+            let exec_result = zts::eval_string(&warmup_code);
+            zts::request_shutdown();
+            exec_result
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("warmup thread panicked: {e}"))?;
+
+        let elapsed = start.elapsed();
+        let elapsed_ms = u32::try_from(elapsed.as_millis()).unwrap_or(u32::MAX);
+        match result {
+            Ok(()) => info!(elapsed_ms, "opcache warmup done"),
+            Err(e) => {
+                warn!(error = %e, elapsed_ms, "opcache warmup script failed");
+            },
+        }
+
+        Ok(())
     }
 }
 

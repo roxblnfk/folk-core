@@ -9,6 +9,7 @@ fn default_config_is_usable() {
     let cfg = FolkConfig::default();
     assert_eq!(cfg.workers.count, 4);
     assert_eq!(cfg.workers.max_jobs, 1000);
+    assert!(cfg.workers.warmup);
 }
 
 #[test]
@@ -55,6 +56,39 @@ fn effective_filter_with_plugin_overrides() {
     assert!(filter.starts_with("info,"));
     assert!(filter.contains("folk_plugin_http=warn"));
     assert!(filter.contains("folk_core=debug"));
+}
+
+#[test]
+fn warmup_default_true() {
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(
+        f,
+        r"
+        [workers]
+        count = 2
+        "
+    )
+    .unwrap();
+
+    let cfg = FolkConfig::load_from(f.path()).unwrap();
+    assert!(cfg.workers.warmup);
+}
+
+#[test]
+fn warmup_can_be_disabled() {
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(
+        f,
+        r"
+        [workers]
+        count = 2
+        warmup = false
+        "
+    )
+    .unwrap();
+
+    let cfg = FolkConfig::load_from(f.path()).unwrap();
+    assert!(!cfg.workers.warmup);
 }
 
 #[test]

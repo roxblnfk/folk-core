@@ -16,6 +16,12 @@ async fn mock_runtime_echoes_request() {
 }
 
 #[tokio::test]
+async fn mock_runtime_warmup_is_noop() {
+    let rt = MockRuntime::echo();
+    rt.warmup().await.unwrap();
+}
+
+#[tokio::test]
 async fn mock_worker_refuses_after_terminate() {
     let rt = MockRuntime::echo();
     let mut worker = rt.spawn().await.unwrap();
