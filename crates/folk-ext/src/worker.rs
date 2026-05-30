@@ -56,7 +56,14 @@ fn run_zts_worker(
     // 3. Install worker bridge channels (thread-local).
     bridge::init_worker_state(worker_id, task_rx, ready_tx);
 
-    // 4. Execute the PHP worker script.
+    // 4. Restore PHP VCWD to the project root before executing the script.
+    //    ZTS uses per-thread virtual CWD. Without this, frameworks that rely
+    //    on getcwd() will look in the wrong directory.
+    if let Some(root) = crate::project_root() {
+        let _ = zts::chdir(&root.to_string_lossy());
+    }
+
+    // 5. Execute the PHP worker script.
     //    The script calls folk_worker_ready() and enters the recv/send loop.
     //    This call blocks until the script exits (channel closed).
     if let Err(e) = zts::execute_script(script) {

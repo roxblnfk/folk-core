@@ -26,6 +26,12 @@ pub use folk_core;
 
 static REGISTRY: OnceLock<Arc<InProcessRegistry>> = OnceLock::new();
 static TOKIO_HANDLE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+static PROJECT_ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+/// Returns the project root directory (CWD at server start).
+pub fn project_root() -> Option<&'static std::path::Path> {
+    PROJECT_ROOT.get().map(|p| p.as_path())
+}
 
 /// ZTS worker thread handles — joined on shutdown to prevent SIGSEGV.
 static ZTS_WORKERS: OnceLock<Mutex<Vec<thread::JoinHandle<()>>>> = OnceLock::new();
@@ -58,6 +64,9 @@ pub fn version() -> String {
 /// Creates one channel pair for the main PHP thread (worker #1).
 /// Additional workers (count > 1) are spawned as ZTS threads by the runtime.
 pub fn start_server(config: FolkConfig, plugins: Vec<Box<dyn Plugin>>) -> anyhow::Result<()> {
+    // Save project root (CWD at server start) for ZTS worker threads.
+    let _ = PROJECT_ROOT.set(std::env::current_dir().unwrap_or_default());
+
     let worker_count = config.workers.count;
     let is_zts = zts::is_zts();
 

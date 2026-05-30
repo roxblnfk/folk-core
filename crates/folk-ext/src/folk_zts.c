@@ -112,6 +112,17 @@ int folk_zts_eval_string(const char *code) {
     return (result == SUCCESS) ? 1 : 0;
 }
 
+/* Change PHP's virtual CWD (VCWD) to the given path.
+ * In ZTS builds, this changes the per-thread working directory.
+ * Returns 0 on success, -1 on failure. */
+int folk_zts_chdir(const char *path) {
+#ifdef VIRTUAL_DIR
+    return VCWD_CHDIR(path);
+#else
+    return chdir(path);
+#endif
+}
+
 /* Check if the current PHP build has ZTS enabled. */
 int folk_zts_is_enabled(void) {
 #ifdef ZTS

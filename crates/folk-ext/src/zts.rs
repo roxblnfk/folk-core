@@ -21,7 +21,22 @@ unsafe extern "C" {
         retval: *mut Zval,
     ) -> c_int;
     fn folk_zts_eval_string(code: *const std::ffi::c_char) -> c_int;
+    fn folk_zts_chdir(path: *const std::ffi::c_char) -> c_int;
     fn folk_zts_is_enabled() -> c_int;
+}
+
+/// Change PHP's virtual CWD (per-thread in ZTS).
+///
+/// This is necessary because `std::env::set_current_dir` changes the
+/// process-wide POSIX CWD, but PHP ZTS uses VCWD which is per-thread.
+pub fn chdir(path: &str) -> anyhow::Result<()> {
+    let c_path = CString::new(path).map_err(|_| anyhow::anyhow!("path contains null byte"))?;
+    let ret = unsafe { folk_zts_chdir(c_path.as_ptr()) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        anyhow::bail!("VCWD_CHDIR failed for {path}")
+    }
 }
 
 /// Returns true if PHP was compiled with ZTS (thread safety).
