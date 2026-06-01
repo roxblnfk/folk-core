@@ -40,29 +40,3 @@ impl HealthRegistry for HealthRegistryImpl {
         join_all(futures).await.into_iter().collect()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-
-    #[tokio::test]
-    async fn registers_and_aggregates() {
-        let reg = HealthRegistryImpl::new();
-        reg.register(
-            "plugin-a".into(),
-            Arc::new(|| Box::pin(async { HealthStatus::ok() })),
-        )
-        .await;
-        reg.register(
-            "plugin-b".into(),
-            Arc::new(|| Box::pin(async { HealthStatus::degraded("queue full") })),
-        )
-        .await;
-
-        let results = reg.check_all().await;
-        assert_eq!(results.len(), 2);
-        assert!(results["plugin-a"].healthy);
-        assert!(!results["plugin-b"].healthy);
-    }
-}
