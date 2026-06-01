@@ -135,6 +135,13 @@ pub fn run_dispatch_loop(dispatch_fn: &str) -> Result<(), &'static str> {
             }
         }
 
+        // Restore VCWD to project root after php_execute_script set it
+        // to dirname(script). Without this, Composer proxy scripts like
+        // vendor/bin/folk-server leave VCWD in vendor/bin/.
+        if let Some(root) = crate::project_root() {
+            let _ = crate::zts::chdir(&root.to_string_lossy());
+        }
+
         // Main dispatch loop.
         loop {
             let req = {
