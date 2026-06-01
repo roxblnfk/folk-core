@@ -27,18 +27,14 @@ impl MetricsRegistry for MetricsRegistryImpl {
     fn counter_vec(&self, name: &str, help: &str, label_keys: &[&str]) -> Arc<dyn ApiCounterVec> {
         let opts = Opts::new(name, help);
         let cv = PromCounterVec::new(opts, label_keys).expect("valid counter spec");
-        self.registry
-            .register(Box::new(cv.clone()))
-            .expect("register counter");
+        let _ = self.registry.register(Box::new(cv.clone()));
         Arc::new(CounterVecAdapter { inner: cv })
     }
 
     fn gauge_vec(&self, name: &str, help: &str, label_keys: &[&str]) -> Arc<dyn ApiGaugeVec> {
         let opts = Opts::new(name, help);
         let gv = PromGaugeVec::new(opts, label_keys).expect("valid gauge spec");
-        self.registry
-            .register(Box::new(gv.clone()))
-            .expect("register gauge");
+        let _ = self.registry.register(Box::new(gv.clone()));
         Arc::new(GaugeVecAdapter { inner: gv })
     }
 
@@ -50,9 +46,7 @@ impl MetricsRegistry for MetricsRegistryImpl {
     ) -> Arc<dyn ApiHistogramVec> {
         let opts = HistogramOpts::new(name, help);
         let hv = PromHistogramVec::new(opts, label_keys).expect("valid histogram spec");
-        self.registry
-            .register(Box::new(hv.clone()))
-            .expect("register histogram");
+        let _ = self.registry.register(Box::new(hv.clone()));
         Arc::new(HistogramVecAdapter { inner: hv })
     }
 
