@@ -52,7 +52,7 @@ void folk_zts_request_shutdown(void) {
  * Skips the shebang line (#!/...) if present — CLI SAPI does this
  * automatically but ZTS worker threads use the embed context where
  * shebang stripping is not performed.
- * Returns 0 (SUCCESS) or -1 (FAILURE). */
+ * Returns 1 (success) or 0 (failure). */
 int folk_zts_execute_script(const char *filename) {
     FILE *fp = fopen(filename, "rb");
     if (!fp) return 0;
@@ -72,7 +72,7 @@ int folk_zts_execute_script(const char *filename) {
     int ret = php_execute_script(&file_handle);
     zend_destroy_file_handle(&file_handle);
     /* fp is closed by zend_destroy_file_handle */
-    return ret;
+    return ret ? 1 : 0;
 }
 
 /* Call a PHP function by name with two arguments (method string + params array).
@@ -104,7 +104,7 @@ int folk_zts_call_dispatch(const char *func_name, zval *method_zval, zval *param
 
 /* Evaluate a PHP code string on the current thread.
  * The code must NOT include the opening <?php tag.
- * Returns 0 (SUCCESS) or -1 (FAILURE). */
+ * Returns 1 (success) or 0 (failure). */
 int folk_zts_eval_string(const char *code) {
     zval retval;
     int result = zend_eval_string((char *)code, &retval, "folk-warmup");
