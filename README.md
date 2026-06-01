@@ -32,7 +32,6 @@ shutdown_timeout = "30s"
 count = 4
 max_jobs = 1000
 ttl = "1h"
-max_memory_mb = 256
 exec_timeout = "30s"
 ```
 

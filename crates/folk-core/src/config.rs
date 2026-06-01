@@ -55,8 +55,6 @@ pub struct WorkersConfig {
     /// Recycle a worker that has been alive longer than this.
     #[serde(with = "humantime_serde")]
     pub ttl: Duration,
-    /// Recycle a worker exceeding this RSS in MB.
-    pub max_memory_mb: u64,
     /// Per-request execution timeout.
     #[serde(with = "humantime_serde")]
     pub exec_timeout: Duration,
@@ -76,7 +74,6 @@ impl Default for WorkersConfig {
             count: 4,
             max_jobs: 1000,
             ttl: Duration::from_secs(3600),
-            max_memory_mb: 256,
             exec_timeout: Duration::from_secs(30),
             boot_timeout: Duration::from_secs(30),
             warmup: true,
