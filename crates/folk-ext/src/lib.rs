@@ -10,7 +10,7 @@ pub mod worker;
 pub mod zts;
 pub mod zval_convert;
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Barrier, Mutex, OnceLock};
 use std::thread;
 
 use ext_php_rs::binary::Binary;
@@ -91,6 +91,8 @@ pub fn start_server(config: FolkConfig, plugins: Vec<Box<dyn Plugin>>) -> anyhow
     REGISTRY.set(registry.clone()).ok();
 
     let workers_config = config.workers.clone();
+    let barrier = Arc::new(Barrier::new(2));
+    let barrier_inner = barrier.clone();
 
     thread::Builder::new()
         .name("folk-tokio".into())
@@ -101,6 +103,7 @@ pub fn start_server(config: FolkConfig, plugins: Vec<Box<dyn Plugin>>) -> anyhow
                 .expect("failed to create tokio runtime");
 
             TOKIO_HANDLE.set(rt.handle().clone()).ok();
+            barrier_inner.wait();
 
             rt.block_on(async move {
                 // Runtime gets the pre-connected channel for worker #1.
@@ -120,7 +123,7 @@ pub fn start_server(config: FolkConfig, plugins: Vec<Box<dyn Plugin>>) -> anyhow
             });
         })?;
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    barrier.wait();
     info!(
         worker_count,
         is_zts, "folk server started, main process is worker #1"
