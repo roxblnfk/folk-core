@@ -19,20 +19,16 @@ categories = ["asynchronous", "web-programming"]
 [workspace.dependencies]
 # core async + io
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec"] }
 async-trait = "0.1"
 futures-util = { version = "0.3", features = ["sink"] }
 bytes = "1"
 
-# protocol
+# serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rmp-serde = "1"
-rmpv = { version = "1", features = ["with-serde"] }
 
-# config + cli
+# config
 figment = { version = "0.10", features = ["toml", "env"] }
-clap = { version = "4", features = ["derive"] }
 
 # logging
 tracing = "0.1"
