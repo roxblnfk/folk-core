@@ -51,6 +51,8 @@ impl FolkServer {
     pub async fn run(mut self) -> Result<()> {
         let _ = logging::init(&self.config.log);
 
+        self.config.workers.normalize();
+
         info!(
             version = folk_api::FOLK_API_VERSION,
             workers = self.config.workers.count,

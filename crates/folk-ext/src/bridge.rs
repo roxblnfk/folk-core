@@ -10,6 +10,8 @@ use tracing::debug;
 
 /// A request sent from the server to a worker thread.
 pub struct TaskRequest {
+    /// Unique, monotonic per-request id (0 is reserved for "no active request").
+    pub request_id: u64,
     pub method: String,
     pub payload: serde_json::Value,
     /// Reply channel. Uses `tokio::sync::oneshot` which does NOT require
@@ -23,6 +25,9 @@ struct WorkerState {
     task_rx: mpsc::Receiver<TaskRequest>,
     ready_tx: Option<mpsc::SyncSender<()>>,
     current_reply: Option<tokio::sync::oneshot::Sender<anyhow::Result<serde_json::Value>>>,
+    /// Id of the request currently being handled on this thread (0 if none).
+    /// Exposed to PHP via `folk_request_id()`.
+    current_request_id: u64,
 }
 
 thread_local! {
@@ -41,6 +46,7 @@ pub fn init_worker_state(
             task_rx,
             ready_tx: Some(ready_tx),
             current_reply: None,
+            current_request_id: 0,
         });
     });
 }
@@ -55,6 +61,18 @@ pub fn cleanup_worker_state() {
 /// Returns true if this thread has worker bridge state initialized.
 pub fn has_worker_state() -> bool {
     WORKER.with(|w| w.borrow().is_some())
+}
+
+/// Id of the request currently being handled on this thread.
+///
+/// Returns `0` when no request is in flight (or this isn't a worker thread).
+/// Exposed to PHP via the `folk_request_id()` native function.
+pub fn current_request_id() -> u64 {
+    WORKER.with(|w| {
+        w.borrow()
+            .as_ref()
+            .map_or(0, |state| state.current_request_id)
+    })
 }
 
 /// Signal ready. Returns Ok(true) if sent, Ok(false) if already called.
@@ -86,6 +104,7 @@ pub fn do_recv() -> Result<Option<(String, Vec<u8>)>, &'static str> {
             let method = req.method.clone();
             // Value → JSON bytes for PHP (only serialization on the hot path)
             let payload_bytes = serde_json::to_vec(&req.payload).unwrap_or_default();
+            state.current_request_id = req.request_id;
             state.current_reply = Some(req.reply);
             Ok(Some((method, payload_bytes)))
         } else {
@@ -148,6 +167,10 @@ pub fn run_dispatch_loop(dispatch_fn: &str) -> Result<(), &'static str> {
                 let mut state = w.borrow_mut();
                 let state = state.as_mut().ok_or("not in a worker thread")?;
                 if let Ok(req) = state.task_rx.recv() {
+                    // Expose the id to PHP (folk_request_id()) for the duration
+                    // of this call. call_dispatch runs OUTSIDE this borrow, so a
+                    // reentrant folk_request_id() from PHP can borrow WORKER safely.
+                    state.current_request_id = req.request_id;
                     req
                 } else {
                     debug!(worker_id = state.worker_id, "dispatch loop: channel closed");
@@ -170,6 +193,13 @@ pub fn run_dispatch_loop(dispatch_fn: &str) -> Result<(), &'static str> {
                 Err(e) => {
                     let _ = req.reply.send(Err(e));
                 },
+            }
+
+            // Clear the active request id between requests.
+            if let Ok(mut state) = w.try_borrow_mut() {
+                if let Some(state) = state.as_mut() {
+                    state.current_request_id = 0;
+                }
             }
         }
     })

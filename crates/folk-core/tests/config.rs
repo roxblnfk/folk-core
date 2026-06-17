@@ -10,6 +10,42 @@ fn default_config_is_usable() {
     assert_eq!(cfg.workers.count, 4);
     assert_eq!(cfg.workers.max_jobs, 1000);
     assert!(cfg.workers.warmup);
+    assert_eq!(cfg.workers.max_concurrent_per_worker, 1);
+}
+
+#[test]
+fn max_concurrent_per_worker_loads_from_toml() {
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(
+        f,
+        r"
+        [workers]
+        max_concurrent_per_worker = 4
+        "
+    )
+    .unwrap();
+
+    let cfg = FolkConfig::load_from(f.path()).unwrap();
+    assert_eq!(cfg.workers.max_concurrent_per_worker, 4);
+}
+
+#[test]
+fn normalize_clamps_max_concurrent_per_worker() {
+    // > 1 is not yet supported: clamp to 1.
+    let mut w = FolkConfig::default().workers;
+    w.max_concurrent_per_worker = 8;
+    w.normalize();
+    assert_eq!(w.max_concurrent_per_worker, 1);
+
+    // 0 is invalid: clamp to 1.
+    w.max_concurrent_per_worker = 0;
+    w.normalize();
+    assert_eq!(w.max_concurrent_per_worker, 1);
+
+    // 1 stays 1.
+    w.max_concurrent_per_worker = 1;
+    w.normalize();
+    assert_eq!(w.max_concurrent_per_worker, 1);
 }
 
 #[test]

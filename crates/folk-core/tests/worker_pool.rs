@@ -29,6 +29,25 @@ async fn execute_round_trips_through_mock_runtime() {
 }
 
 #[tokio::test]
+async fn dispatch_assigns_unique_monotonic_request_ids() {
+    let rt = Arc::new(MockRuntime::echo());
+    let config = WorkersConfig {
+        count: 2,
+        ..WorkersConfig::default()
+    };
+    let pool = WorkerPool::new(rt.clone(), config).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Dispatch sequentially so the observed order is deterministic.
+    for _ in 0..5 {
+        pool.execute_value("dispatch", json!({})).await.unwrap();
+    }
+
+    let ids = rt.seen_request_ids();
+    assert_eq!(ids, vec![1, 2, 3, 4, 5], "ids must be unique and monotonic");
+}
+
+#[tokio::test]
 async fn trigger_reload_recycles_idle_workers() {
     let rt = Arc::new(MockRuntime::echo());
     let config = WorkersConfig {

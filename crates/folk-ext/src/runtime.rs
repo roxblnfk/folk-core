@@ -197,6 +197,7 @@ impl WorkerHandle for ChannelWorkerHandle {
         &mut self,
         method: &str,
         payload: serde_json::Value,
+        request_id: u64,
     ) -> Result<serde_json::Value> {
         let tx = self
             .task_tx
@@ -212,6 +213,7 @@ impl WorkerHandle for ChannelWorkerHandle {
         // SyncSender::send blocks only when channel is full (capacity=8).
         // With semaphore=4, at most 4 in-flight — never blocks.
         tx.send(bridge::TaskRequest {
+            request_id,
             method,
             payload,
             reply: reply_tx,

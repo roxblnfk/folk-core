@@ -3,6 +3,7 @@
 //! See `folk-spec/spec/03-worker-lifecycle.md` for the design.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -32,8 +33,9 @@ pub enum WorkError {
     Internal(String),
 }
 
-/// One dispatch request: method name, payload + reply channel.
+/// One dispatch request: id, method name, payload + reply channel.
 struct DispatchRequest {
+    request_id: u64,
     method: String,
     payload: serde_json::Value,
     reply: oneshot::Sender<Result<serde_json::Value>>,
@@ -43,6 +45,8 @@ struct DispatchRequest {
 pub struct WorkerPool {
     request_tx: mpsc::Sender<DispatchRequest>,
     semaphore: Arc<Semaphore>,
+    /// Monotonic generator for per-request ids. Starts at 1; 0 means "no request".
+    next_request_id: AtomicU64,
     runtime: Arc<dyn Runtime>,
     /// Monotonic reload generation. Bumped by `trigger_reload`; observed by
     /// slot supervisors to recycle their workers after the current request.
@@ -71,6 +75,7 @@ impl WorkerPool {
         Ok(Arc::new(Self {
             request_tx,
             semaphore,
+            next_request_id: AtomicU64::new(1),
             runtime,
             reload_tx,
             _pool_task: pool_task,
@@ -104,9 +109,11 @@ impl WorkerPool {
             .await
             .context("pool semaphore closed")?;
 
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let (reply_tx, reply_rx) = oneshot::channel();
         self.request_tx
             .send(DispatchRequest {
+                request_id,
                 method: method.to_string(),
                 payload,
                 reply: reply_tx,
@@ -267,7 +274,14 @@ async fn slot_supervisor(
             unreachable!()
         };
         slot.mark_busy();
-        let result = dispatch_one(w.as_mut(), &req.method, req.payload, config.exec_timeout).await;
+        let result = dispatch_one(
+            w.as_mut(),
+            &req.method,
+            req.payload,
+            req.request_id,
+            config.exec_timeout,
+        )
+        .await;
         slot.mark_idle();
 
         // Send reply.
@@ -334,9 +348,10 @@ async fn dispatch_one(
     worker: &mut dyn WorkerHandle,
     method: &str,
     payload: serde_json::Value,
+    request_id: u64,
     exec_timeout: Duration,
 ) -> Result<serde_json::Value, WorkError> {
-    let recv = tokio::time::timeout(exec_timeout, worker.execute(method, payload));
+    let recv = tokio::time::timeout(exec_timeout, worker.execute(method, payload, request_id));
     match recv.await {
         Ok(Ok(result)) => Ok(result),
         Ok(Err(e)) => Err(WorkError::Internal(e.to_string())),

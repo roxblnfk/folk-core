@@ -51,6 +51,12 @@ pub struct WorkersConfig {
     pub php: String,
     /// Number of worker processes.
     pub count: usize,
+    /// Maximum number of requests handled concurrently by a single worker.
+    ///
+    /// Currently only `1` is supported (synchronous frameworks). Values `> 1`
+    /// are reserved for a future async runtime (PHP Fibers) and are clamped to
+    /// `1` with a warning by [`WorkersConfig::normalize`].
+    pub max_concurrent_per_worker: usize,
     /// Recycle a worker after this many requests.
     pub max_jobs: u64,
     /// Recycle a worker that has been alive longer than this.
@@ -73,11 +79,29 @@ impl Default for WorkersConfig {
             script: "vendor/bin/folk-worker".into(),
             php: "php".into(),
             count: 4,
+            max_concurrent_per_worker: 1,
             max_jobs: 1000,
             ttl: Duration::from_secs(3600),
             exec_timeout: Duration::from_secs(30),
             boot_timeout: Duration::from_secs(30),
             warmup: true,
+        }
+    }
+}
+
+impl WorkersConfig {
+    /// Clamp out-of-range values to supported ones, warning where a requested
+    /// value cannot be honored. Call once at startup before building the pool.
+    pub fn normalize(&mut self) {
+        if self.max_concurrent_per_worker > 1 {
+            tracing::warn!(
+                requested = self.max_concurrent_per_worker,
+                "max_concurrent_per_worker > 1 is not yet supported; clamping to 1 \
+                 (per-worker concurrency requires a future async runtime)"
+            );
+            self.max_concurrent_per_worker = 1;
+        } else if self.max_concurrent_per_worker == 0 {
+            self.max_concurrent_per_worker = 1;
         }
     }
 }

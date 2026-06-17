@@ -229,6 +229,17 @@ pub fn folk_is_worker_thread() -> bool {
     bridge::has_worker_state()
 }
 
+/// Returns the id of the request currently being handled (0 if none).
+///
+/// Stable for the duration of a single request — useful for correlating PHP
+/// application logs with Rust-side access logs.
+#[cfg(feature = "standalone")]
+#[php_function]
+#[allow(clippy::cast_possible_wrap)] // request ids never approach i64::MAX in practice
+pub fn folk_request_id() -> i64 {
+    bridge::current_request_id() as i64
+}
+
 /// Run the zero-copy dispatch loop.
 ///
 /// Blocks until the channel is closed (server shutdown). Calls the named
@@ -256,5 +267,6 @@ pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
         .function(wrap_function!(folk_worker_send))
         .function(wrap_function!(folk_worker_send_error))
         .function(wrap_function!(folk_is_worker_thread))
+        .function(wrap_function!(folk_request_id))
         .function(wrap_function!(folk_worker_run))
 }

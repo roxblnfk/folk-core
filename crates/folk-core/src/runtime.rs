@@ -24,10 +24,14 @@ pub trait WorkerHandle: Send + 'static {
     async fn ready(&mut self) -> Result<()>;
 
     /// Execute a single request: send structured data, receive result.
+    ///
+    /// `request_id` is a unique, monotonic id for this request, exposed to PHP
+    /// via `folk_request_id()` for log correlation.
     async fn execute(
         &mut self,
         method: &str,
         payload: serde_json::Value,
+        request_id: u64,
     ) -> Result<serde_json::Value>;
 
     /// Terminate the worker. Implementations should signal shutdown and
@@ -74,6 +78,8 @@ type MockResponder =
 pub struct MockRuntime {
     responder: MockResponder,
     next_id: std::sync::atomic::AtomicU32,
+    /// Request ids observed by all workers, in dispatch order. For test assertions.
+    seen_request_ids: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
 }
 
 impl MockRuntime {
@@ -82,12 +88,18 @@ impl MockRuntime {
         Self {
             responder: std::sync::Arc::new(|_method, payload| Ok(payload.clone())),
             next_id: std::sync::atomic::AtomicU32::new(10000),
+            seen_request_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
     /// Number of workers spawned so far. Useful for asserting recycling.
     pub fn spawn_count(&self) -> u32 {
         self.next_id.load(std::sync::atomic::Ordering::Relaxed) - 10000
+    }
+
+    /// Request ids passed to `execute`, in the order they were dispatched.
+    pub fn seen_request_ids(&self) -> Vec<u64> {
+        self.seen_request_ids.lock().unwrap().clone()
     }
 }
 
@@ -100,6 +112,7 @@ impl Runtime for MockRuntime {
         Ok(Box::new(MockWorker {
             id,
             responder: self.responder.clone(),
+            seen_request_ids: self.seen_request_ids.clone(),
             terminated: false,
         }))
     }
@@ -109,6 +122,7 @@ impl Runtime for MockRuntime {
 pub struct MockWorker {
     id: u32,
     responder: MockResponder,
+    seen_request_ids: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
     terminated: bool,
 }
 
@@ -126,10 +140,12 @@ impl WorkerHandle for MockWorker {
         &mut self,
         method: &str,
         payload: serde_json::Value,
+        request_id: u64,
     ) -> Result<serde_json::Value> {
         if self.terminated {
             anyhow::bail!("worker terminated");
         }
+        self.seen_request_ids.lock().unwrap().push(request_id);
         (self.responder)(method, &payload)
     }
 
