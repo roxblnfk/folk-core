@@ -20,6 +20,7 @@ pub struct FolkConfig {
     pub server: ServerConfig,
     pub workers: WorkersConfig,
     pub log: LogConfig,
+    pub dev: DevConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +143,34 @@ pub enum LogFormat {
     Text,
     Json,
     Pretty,
+}
+
+/// Development-mode configuration (hot reload / watch mode).
+///
+/// Disabled by default — production runs must not pay the watcher cost.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DevConfig {
+    /// Watch PHP files and reload workers on change (default: false).
+    pub watch: bool,
+    /// Directories to watch (recursively). Relative to the project root.
+    pub watch_paths: Vec<String>,
+    /// File extensions that trigger a reload (without the leading dot).
+    pub watch_extensions: Vec<String>,
+    /// Debounce window: collapse a burst of file events into one reload.
+    #[serde(with = "humantime_serde")]
+    pub debounce: Duration,
+}
+
+impl Default for DevConfig {
+    fn default() -> Self {
+        Self {
+            watch: false,
+            watch_paths: vec!["app".into(), "src".into(), "routes".into(), "config".into()],
+            watch_extensions: vec!["php".into()],
+            debounce: Duration::from_millis(300),
+        }
+    }
 }
 
 impl FolkConfig {

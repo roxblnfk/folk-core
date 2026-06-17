@@ -30,6 +30,7 @@ prometheus = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 humantime-serde = "1"
+notify-debouncer-mini = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

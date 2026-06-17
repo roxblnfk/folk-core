@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
 use folk_api::Executor;
-use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -43,6 +43,10 @@ struct DispatchRequest {
 pub struct WorkerPool {
     request_tx: mpsc::Sender<DispatchRequest>,
     semaphore: Arc<Semaphore>,
+    runtime: Arc<dyn Runtime>,
+    /// Monotonic reload generation. Bumped by `trigger_reload`; observed by
+    /// slot supervisors to recycle their workers after the current request.
+    reload_tx: watch::Sender<u64>,
     _pool_task: JoinHandle<()>,
 }
 
@@ -54,14 +58,37 @@ impl WorkerPool {
     pub fn new(runtime: Arc<dyn Runtime>, config: WorkersConfig) -> Result<Arc<Self>> {
         let semaphore = Arc::new(Semaphore::new(config.count));
         let (request_tx, request_rx) = mpsc::channel::<DispatchRequest>(1024);
+        let (reload_tx, reload_rx) = watch::channel(0u64);
 
-        let pool_task = tokio::spawn(pool_main(runtime, config, request_rx, semaphore.clone()));
+        let pool_task = tokio::spawn(pool_main(
+            runtime.clone(),
+            config,
+            request_rx,
+            semaphore.clone(),
+            reload_rx,
+        ));
 
         Ok(Arc::new(Self {
             request_tx,
             semaphore,
+            runtime,
+            reload_tx,
             _pool_task: pool_task,
         }))
+    }
+
+    /// Trigger a hot reload: invalidate compiled-code caches, then signal all
+    /// recyclable workers to restart after their current request completes.
+    ///
+    /// Non-recyclable workers (the main PHP thread) keep running — see the
+    /// dev-mode docs for the implications.
+    pub async fn trigger_reload(&self) {
+        if let Err(e) = self.runtime.reload().await {
+            warn!(error = %e, "reload: cache invalidation failed; recycling anyway");
+        }
+        self.reload_tx.send_modify(|g| *g += 1);
+        let generation = *self.reload_tx.borrow();
+        info!(generation, "hot reload triggered; recycling workers");
     }
 
     /// Dispatch a Value-based request through the pool.
@@ -129,6 +156,7 @@ async fn pool_main(
     config: WorkersConfig,
     mut request_rx: mpsc::Receiver<DispatchRequest>,
     _semaphore: Arc<Semaphore>,
+    reload_rx: watch::Receiver<u64>,
 ) {
     let mut slot_inboxes: Vec<mpsc::Sender<DispatchRequest>> = Vec::with_capacity(config.count);
     let mut slot_supervisors: Vec<JoinHandle<()>> = Vec::with_capacity(config.count);
@@ -138,7 +166,14 @@ async fn pool_main(
         slot_inboxes.push(slot_tx);
         let runtime_clone = runtime.clone();
         let cfg_clone = config.clone();
-        let supervisor = tokio::spawn(slot_supervisor(slot_id, runtime_clone, cfg_clone, slot_rx));
+        let reload_clone = reload_rx.clone();
+        let supervisor = tokio::spawn(slot_supervisor(
+            slot_id,
+            runtime_clone,
+            cfg_clone,
+            slot_rx,
+            reload_clone,
+        ));
         slot_supervisors.push(supervisor);
     }
 
@@ -166,13 +201,18 @@ async fn slot_supervisor(
     runtime: Arc<dyn Runtime>,
     config: WorkersConfig,
     mut inbox: mpsc::Receiver<DispatchRequest>,
+    mut reload_rx: watch::Receiver<u64>,
 ) {
     let mut slot = SlotInfo::new();
     let mut worker: Option<Box<dyn WorkerHandle>> = None;
+    // Reload generation this worker was booted at. When the pool's generation
+    // advances past this, the worker must be recycled to pick up new code.
+    let mut boot_generation: u64 = *reload_rx.borrow();
 
     loop {
         // Spawn a worker if we don't have one.
         if worker.is_none() {
+            boot_generation = *reload_rx.borrow();
             match boot_worker(&runtime, &config, &mut slot).await {
                 Ok(w) => worker = Some(w),
                 Err(e) => {
@@ -183,20 +223,49 @@ async fn slot_supervisor(
             }
         }
 
-        let Some(w) = worker.as_mut() else {
-            unreachable!()
-        };
+        let recyclable = worker.as_ref().is_some_and(|w| w.is_recyclable());
 
-        // Wait for a request or for shutdown.
-        let Some(req) = inbox.recv().await else {
-            info!(slot_id, "supervisor shutting down (inbox closed)");
-            if let Err(e) = w.terminate().await {
-                warn!(slot_id, error = ?e, "terminate error during shutdown");
-            }
-            return;
+        // Wait for a request, a reload signal, or shutdown.
+        let req = tokio::select! {
+            biased;
+            // React to a reload while idle so workers restart promptly even
+            // without traffic. Skip for non-recyclable workers (main thread).
+            res = reload_rx.changed(), if recyclable => {
+                if res.is_err() {
+                    // Pool dropped the sender — treat as shutdown.
+                    info!(slot_id, "supervisor shutting down (reload channel closed)");
+                    if let Some(mut w) = worker.take() {
+                        let _ = w.terminate().await;
+                    }
+                    return;
+                }
+                if *reload_rx.borrow() > boot_generation {
+                    info!(slot_id, "recycling idle worker for hot reload");
+                    if let Some(mut w) = worker.take() {
+                        let _ = w.terminate().await;
+                    }
+                    slot = SlotInfo::new();
+                }
+                continue;
+            },
+            maybe_req = inbox.recv() => {
+                let Some(req) = maybe_req else {
+                    info!(slot_id, "supervisor shutting down (inbox closed)");
+                    if let Some(mut w) = worker.take() {
+                        if let Err(e) = w.terminate().await {
+                            warn!(slot_id, error = ?e, "terminate error during shutdown");
+                        }
+                    }
+                    return;
+                };
+                req
+            },
         };
 
         // Dispatch.
+        let Some(w) = worker.as_mut() else {
+            unreachable!()
+        };
         slot.mark_busy();
         let result = dispatch_one(w.as_mut(), &req.method, req.payload, config.exec_timeout).await;
         slot.mark_idle();
@@ -204,15 +273,27 @@ async fn slot_supervisor(
         // Send reply.
         let _ = req.reply.send(result.map_err(anyhow::Error::from));
 
-        // Recycle?
-        if slot.should_recycle(&config) {
+        // Recycle on reload (after the request completes) or per the lifecycle
+        // policies (max_jobs / ttl).
+        let reload_pending = *reload_rx.borrow() > boot_generation;
+        if reload_pending || slot.should_recycle(&config) {
             if let Some(ref w) = worker {
                 if !w.is_recyclable() {
                     debug!(slot_id, "skipping recycle for non-recyclable worker");
                     continue;
                 }
             }
-            info!(slot_id, jobs = slot.jobs_handled, "recycling worker");
+            let reason = if reload_pending {
+                "hot reload"
+            } else {
+                "lifecycle"
+            };
+            info!(
+                slot_id,
+                jobs = slot.jobs_handled,
+                reason,
+                "recycling worker"
+            );
             if let Some(mut w) = worker.take() {
                 let _ = w.terminate().await;
             }

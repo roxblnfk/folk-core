@@ -54,6 +54,15 @@ pub trait Runtime: Send + Sync + 'static {
     async fn warmup(&self) -> Result<()> {
         Ok(())
     }
+
+    /// Invalidate compiled-code caches so respawned workers pick up changes.
+    ///
+    /// Called by the dev-mode file watcher just before workers are recycled.
+    /// In ZTS the OPcache is shared process-wide, so a single reset affects
+    /// every worker thread. Default: no-op.
+    async fn reload(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 // --- MockRuntime: in-memory runtime for tests ---
@@ -74,6 +83,11 @@ impl MockRuntime {
             responder: std::sync::Arc::new(|_method, payload| Ok(payload.clone())),
             next_id: std::sync::atomic::AtomicU32::new(10000),
         }
+    }
+
+    /// Number of workers spawned so far. Useful for asserting recycling.
+    pub fn spawn_count(&self) -> u32 {
+        self.next_id.load(std::sync::atomic::Ordering::Relaxed) - 10000
     }
 }
 

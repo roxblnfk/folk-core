@@ -73,9 +73,12 @@ pub fn zval_to_value(zval: &Zval) -> serde_json::Value {
         if let Some(ht) = zval.array() {
             // Check if any key is a string key (→ object), else sequential array
             #[allow(clippy::explicit_iter_loop)]
-            let has_string_keys = ht
-                .iter()
-                .any(|(key, _)| matches!(key, ArrayKey::String(_) | ArrayKey::Str(_)));
+            let has_string_keys = ht.iter().any(|(key, _)| {
+                matches!(
+                    key,
+                    ArrayKey::String(_) | ArrayKey::Str(_) | ArrayKey::ZendString(_)
+                )
+            });
 
             if has_string_keys {
                 let mut map = serde_json::Map::new();
@@ -84,6 +87,7 @@ pub fn zval_to_value(zval: &Zval) -> serde_json::Value {
                     let k = match key {
                         ArrayKey::String(s) => s,
                         ArrayKey::Str(s) => s.to_string(),
+                        ArrayKey::ZendString(s) => s.as_str().unwrap_or_default().to_owned(),
                         ArrayKey::Long(i) => i.to_string(),
                     };
                     map.insert(k, zval_to_value(val));

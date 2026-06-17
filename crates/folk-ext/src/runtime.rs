@@ -158,6 +158,15 @@ foreach ($classmap as $class => $file) {{
 
         Ok(())
     }
+
+    // NOTE: no `reload()` override. We deliberately do NOT run a dedicated ZTS
+    // eval thread (e.g. `opcache_reset()`) on hot reload: a fresh TSRM thread
+    // running concurrently with live worker threads being recycled races on
+    // TSRM init/teardown and can SIGSEGV. Recycling re-bootstraps each worker,
+    // which recompiles changed files when OPcache is off (the `php` CLI default)
+    // or when `opcache.validate_timestamps=1` (the standard dev setting). For
+    // hot reload in dev, keep `opcache.validate_timestamps=1` (do not set
+    // `opcache.enable_cli=1` with `validate_timestamps=0`).
 }
 
 /// Handle connected to a worker via channels.

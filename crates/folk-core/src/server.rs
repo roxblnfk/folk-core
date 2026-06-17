@@ -74,6 +74,26 @@ impl FolkServer {
 
         info!("worker pool started");
 
+        // Dev-mode hot reload: watch PHP files and recycle workers on change.
+        // Keep the guard alive for the lifetime of the server.
+        let _watch_guard = if self.config.dev.watch {
+            if self.config.workers.count <= 1 {
+                warn!(
+                    "hot reload enabled with workers.count <= 1: the main PHP thread is not \
+                     recyclable, so code changes will not be picked up. Set workers.count > 1."
+                );
+            }
+            match crate::watch::spawn(&self.config.dev, pool.clone()) {
+                Ok(guard) => Some(guard),
+                Err(e) => {
+                    warn!(error = %e, "failed to start hot reload watcher; continuing without it");
+                    None
+                },
+            }
+        } else {
+            None
+        };
+
         let ctx = PluginContext {
             executor: pool.clone(),
             shutdown: shutdown_rx.clone(),

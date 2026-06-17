@@ -9,5 +9,6 @@ pub mod metrics_registry;
 pub mod plugin_registry;
 pub mod runtime;
 pub mod server;
+pub mod watch;
 pub mod worker_pool;
 pub mod worker_slot;

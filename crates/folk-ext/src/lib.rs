@@ -30,7 +30,7 @@ static PROJECT_ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
 
 /// Returns the project root directory (CWD at server start).
 pub fn project_root() -> Option<&'static std::path::Path> {
-    PROJECT_ROOT.get().map(|p| p.as_path())
+    PROJECT_ROOT.get().map(std::path::PathBuf::as_path)
 }
 
 /// ZTS worker thread handles — joined on shutdown to prevent SIGSEGV.

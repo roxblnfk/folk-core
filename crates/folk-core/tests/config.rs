@@ -92,6 +92,37 @@ fn warmup_can_be_disabled() {
 }
 
 #[test]
+fn dev_watch_defaults_off() {
+    let cfg = FolkConfig::default();
+    assert!(!cfg.dev.watch);
+    assert!(cfg.dev.watch_paths.contains(&"app".to_string()));
+    assert_eq!(cfg.dev.watch_extensions, vec!["php".to_string()]);
+    assert_eq!(cfg.dev.debounce, std::time::Duration::from_millis(300));
+}
+
+#[test]
+fn dev_watch_from_toml() {
+    let mut f = NamedTempFile::new().unwrap();
+    writeln!(
+        f,
+        r#"
+        [dev]
+        watch = true
+        watch_paths = ["src", "lib"]
+        watch_extensions = ["php", "phtml"]
+        debounce = "500ms"
+        "#
+    )
+    .unwrap();
+
+    let cfg = FolkConfig::load_from(f.path()).unwrap();
+    assert!(cfg.dev.watch);
+    assert_eq!(cfg.dev.watch_paths, vec!["src", "lib"]);
+    assert_eq!(cfg.dev.watch_extensions, vec!["php", "phtml"]);
+    assert_eq!(cfg.dev.debounce, std::time::Duration::from_millis(500));
+}
+
+#[test]
 fn log_plugins_from_toml() {
     let mut f = NamedTempFile::new().unwrap();
     writeln!(
