@@ -24,8 +24,8 @@ standalone = []
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-folk-api = "0.2"
-folk-core = { version = "0.2.10", path = "../folk-core" }
+folk-api = "0.2.2"
+folk-core = { version = "0.3.0", path = "../folk-core" }
 
 ext-php-rs = "0.15"
 

@@ -3,7 +3,6 @@
 //! See `folk-spec/spec/03-worker-lifecycle.md` for the design.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -35,7 +34,7 @@ pub enum WorkError {
 
 /// One dispatch request: id, method name, payload + reply channel.
 struct DispatchRequest {
-    request_id: u64,
+    request_id: Arc<str>,
     method: String,
     payload: serde_json::Value,
     reply: oneshot::Sender<Result<serde_json::Value>>,
@@ -45,8 +44,6 @@ struct DispatchRequest {
 pub struct WorkerPool {
     request_tx: mpsc::Sender<DispatchRequest>,
     semaphore: Arc<Semaphore>,
-    /// Monotonic generator for per-request ids. Starts at 1; 0 means "no request".
-    next_request_id: AtomicU64,
     runtime: Arc<dyn Runtime>,
     /// Monotonic reload generation. Bumped by `trigger_reload`; observed by
     /// slot supervisors to recycle their workers after the current request.
@@ -75,7 +72,6 @@ impl WorkerPool {
         Ok(Arc::new(Self {
             request_tx,
             semaphore,
-            next_request_id: AtomicU64::new(1),
             runtime,
             reload_tx,
             _pool_task: pool_task,
@@ -97,11 +93,14 @@ impl WorkerPool {
     }
 
     /// Dispatch a Value-based request through the pool.
+    ///
+    /// Returns the response together with the `request_id` (a UUID v7) generated
+    /// for this request — the same id exposed to PHP via `folk_request_id()`.
     async fn dispatch_value(
         &self,
         method: &str,
         payload: serde_json::Value,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<(serde_json::Value, Arc<str>)> {
         let permit = self
             .semaphore
             .clone()
@@ -109,11 +108,14 @@ impl WorkerPool {
             .await
             .context("pool semaphore closed")?;
 
-        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        // UUID v7: time-ordered (sortable by creation time) and globally unique
+        // across instances and restarts — usable as a single correlation key in
+        // aggregated logs.
+        let request_id: Arc<str> = Arc::from(uuid::Uuid::now_v7().hyphenated().to_string());
         let (reply_tx, reply_rx) = oneshot::channel();
         self.request_tx
             .send(DispatchRequest {
-                request_id,
+                request_id: request_id.clone(),
                 method: method.to_string(),
                 payload,
                 reply: reply_tx,
@@ -126,7 +128,7 @@ impl WorkerPool {
             .map_err(|_| anyhow!("pool dropped reply channel"))?;
 
         drop(permit);
-        result
+        result.map(|value| (value, request_id))
     }
 }
 
@@ -141,7 +143,7 @@ impl Executor for WorkerPool {
         // Legacy path: parse JSON bytes → Value → dispatch → Value → serialize
         let value: serde_json::Value =
             serde_json::from_slice(&payload).context("pool: failed to parse payload as JSON")?;
-        let result = self.dispatch_value(method, value).await?;
+        let (result, _id) = self.dispatch_value(method, value).await?;
         let bytes = serde_json::to_vec(&result).context("pool: failed to serialize response")?;
         Ok(Bytes::from(bytes))
     }
@@ -152,6 +154,16 @@ impl Executor for WorkerPool {
         payload: serde_json::Value,
     ) -> Result<serde_json::Value> {
         debug!(method, "pool: execute_value called (zero-copy path)");
+        let (value, _id) = self.dispatch_value(method, payload).await?;
+        Ok(value)
+    }
+
+    async fn execute_value_traced(
+        &self,
+        method: &str,
+        payload: serde_json::Value,
+    ) -> Result<(serde_json::Value, Arc<str>)> {
+        debug!(method, "pool: execute_value_traced called");
         self.dispatch_value(method, payload).await
     }
 }
@@ -278,7 +290,7 @@ async fn slot_supervisor(
             w.as_mut(),
             &req.method,
             req.payload,
-            req.request_id,
+            req.request_id.clone(),
             config.exec_timeout,
         )
         .await;
@@ -348,7 +360,7 @@ async fn dispatch_one(
     worker: &mut dyn WorkerHandle,
     method: &str,
     payload: serde_json::Value,
-    request_id: u64,
+    request_id: Arc<str>,
     exec_timeout: Duration,
 ) -> Result<serde_json::Value, WorkError> {
     let recv = tokio::time::timeout(exec_timeout, worker.execute(method, payload, request_id));

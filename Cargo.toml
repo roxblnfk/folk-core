@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.10"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -26,6 +26,9 @@ bytes = "1"
 # serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# request ids (UUID v7 — time-ordered, globally unique)
+uuid = { version = "1", features = ["v7"] }
 
 # config
 figment = { version = "0.10", features = ["toml", "env"] }

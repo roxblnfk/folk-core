@@ -229,15 +229,16 @@ pub fn folk_is_worker_thread() -> bool {
     bridge::has_worker_state()
 }
 
-/// Returns the id of the request currently being handled (0 if none).
+/// Returns the id of the request currently being handled (`""` if none).
 ///
-/// Stable for the duration of a single request — useful for correlating PHP
-/// application logs with Rust-side access logs.
+/// A UUID v7, stable for the duration of a single request — useful for
+/// correlating PHP application logs with Rust-side access logs.
 #[cfg(feature = "standalone")]
 #[php_function]
-#[allow(clippy::cast_possible_wrap)] // request ids never approach i64::MAX in practice
-pub fn folk_request_id() -> i64 {
-    bridge::current_request_id() as i64
+pub fn folk_request_id() -> String {
+    bridge::current_request_id()
+        .map(|id| id.to_string())
+        .unwrap_or_default()
 }
 
 /// Run the zero-copy dispatch loop.

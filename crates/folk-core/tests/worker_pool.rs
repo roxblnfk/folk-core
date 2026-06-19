@@ -29,7 +29,7 @@ async fn execute_round_trips_through_mock_runtime() {
 }
 
 #[tokio::test]
-async fn dispatch_assigns_unique_monotonic_request_ids() {
+async fn dispatch_assigns_unique_uuid_request_ids() {
     let rt = Arc::new(MockRuntime::echo());
     let config = WorkersConfig {
         count: 2,
@@ -38,13 +38,35 @@ async fn dispatch_assigns_unique_monotonic_request_ids() {
     let pool = WorkerPool::new(rt.clone(), config).unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Dispatch sequentially so the observed order is deterministic.
     for _ in 0..5 {
         pool.execute_value("dispatch", json!({})).await.unwrap();
     }
 
     let ids = rt.seen_request_ids();
-    assert_eq!(ids, vec![1, 2, 3, 4, 5], "ids must be unique and monotonic");
+    assert_eq!(ids.len(), 5);
+    // All ids are distinct.
+    let unique: std::collections::HashSet<_> = ids.iter().collect();
+    assert_eq!(unique.len(), 5, "request ids must be unique");
+    // Each id is a valid UUID v7.
+    for id in &ids {
+        let parsed = uuid::Uuid::parse_str(id).expect("request id must be a valid UUID");
+        assert_eq!(parsed.get_version_num(), 7, "request id must be UUID v7");
+    }
+}
+
+#[tokio::test]
+async fn execute_value_traced_returns_the_dispatched_id() {
+    let rt = Arc::new(MockRuntime::echo());
+    let pool = WorkerPool::new(rt.clone(), WorkersConfig::default()).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let (_value, id) = pool
+        .execute_value_traced("dispatch", json!({}))
+        .await
+        .unwrap();
+
+    // The id returned to the caller is exactly the one the worker observed.
+    assert_eq!(rt.seen_request_ids(), vec![id.to_string()]);
 }
 
 #[tokio::test]

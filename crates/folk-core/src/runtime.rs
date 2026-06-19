@@ -7,6 +7,8 @@
 //! In phase 23 (extension mode), the runtime spawns OS threads that run PHP
 //! inside the same process. Communication is via channels (zero IPC).
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -25,13 +27,13 @@ pub trait WorkerHandle: Send + 'static {
 
     /// Execute a single request: send structured data, receive result.
     ///
-    /// `request_id` is a unique, monotonic id for this request, exposed to PHP
-    /// via `folk_request_id()` for log correlation.
+    /// `request_id` is a globally-unique id (UUID v7) for this request, exposed
+    /// to PHP via `folk_request_id()` for log correlation.
     async fn execute(
         &mut self,
         method: &str,
         payload: serde_json::Value,
-        request_id: u64,
+        request_id: Arc<str>,
     ) -> Result<serde_json::Value>;
 
     /// Terminate the worker. Implementations should signal shutdown and
@@ -79,7 +81,7 @@ pub struct MockRuntime {
     responder: MockResponder,
     next_id: std::sync::atomic::AtomicU32,
     /// Request ids observed by all workers, in dispatch order. For test assertions.
-    seen_request_ids: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    seen_request_ids: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl MockRuntime {
@@ -98,7 +100,7 @@ impl MockRuntime {
     }
 
     /// Request ids passed to `execute`, in the order they were dispatched.
-    pub fn seen_request_ids(&self) -> Vec<u64> {
+    pub fn seen_request_ids(&self) -> Vec<String> {
         self.seen_request_ids.lock().unwrap().clone()
     }
 }
@@ -122,7 +124,7 @@ impl Runtime for MockRuntime {
 pub struct MockWorker {
     id: u32,
     responder: MockResponder,
-    seen_request_ids: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    seen_request_ids: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     terminated: bool,
 }
 
@@ -140,12 +142,15 @@ impl WorkerHandle for MockWorker {
         &mut self,
         method: &str,
         payload: serde_json::Value,
-        request_id: u64,
+        request_id: Arc<str>,
     ) -> Result<serde_json::Value> {
         if self.terminated {
             anyhow::bail!("worker terminated");
         }
-        self.seen_request_ids.lock().unwrap().push(request_id);
+        self.seen_request_ids
+            .lock()
+            .unwrap()
+            .push(request_id.to_string());
         (self.responder)(method, &payload)
     }
 

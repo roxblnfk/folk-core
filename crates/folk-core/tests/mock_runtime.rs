@@ -11,7 +11,10 @@ async fn mock_runtime_echoes_request() {
 
     // Execute should echo the payload back.
     let payload = json!({"hello": "world"});
-    let result = worker.execute("test", payload.clone(), 1).await.unwrap();
+    let result = worker
+        .execute("test", payload.clone(), "test-id".into())
+        .await
+        .unwrap();
     assert_eq!(result, payload);
 }
 
@@ -28,6 +31,6 @@ async fn mock_worker_refuses_after_terminate() {
     worker.ready().await.unwrap();
     worker.terminate().await.unwrap();
 
-    let result = worker.execute("test", json!("hi"), 1).await;
+    let result = worker.execute("test", json!("hi"), "test-id".into()).await;
     assert!(result.is_err());
 }

@@ -197,7 +197,7 @@ impl WorkerHandle for ChannelWorkerHandle {
         &mut self,
         method: &str,
         payload: serde_json::Value,
-        request_id: u64,
+        request_id: std::sync::Arc<str>,
     ) -> Result<serde_json::Value> {
         let tx = self
             .task_tx
