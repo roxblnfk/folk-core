@@ -13,6 +13,7 @@ pub mod zval_convert;
 use std::sync::{Arc, Barrier, Mutex, OnceLock};
 use std::thread;
 
+use anyhow::Context as _;
 use ext_php_rs::binary::Binary;
 use ext_php_rs::prelude::*;
 use folk_api::Plugin;
@@ -65,7 +66,8 @@ pub fn version() -> String {
 /// Additional workers (count > 1) are spawned as ZTS threads by the runtime.
 pub fn start_server(config: FolkConfig, plugins: Vec<Box<dyn Plugin>>) -> anyhow::Result<()> {
     // Save project root (CWD at server start) for ZTS worker threads.
-    let _ = PROJECT_ROOT.set(std::env::current_dir().unwrap_or_default());
+    let cwd = std::env::current_dir().context("cannot determine current directory")?;
+    let _ = PROJECT_ROOT.set(cwd);
 
     let worker_count = config.workers.count;
     let is_zts = zts::is_zts();

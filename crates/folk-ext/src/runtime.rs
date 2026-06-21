@@ -13,7 +13,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use folk_core::config::WorkersConfig;
 use folk_core::runtime::{Runtime, WorkerHandle};
@@ -54,7 +54,7 @@ impl ExtensionRuntime {
         // ZTS threads may have a different CWD after php_request_startup(),
         // so resolve to absolute path before spawning.
         let script = std::env::current_dir()
-            .unwrap_or_default()
+            .context("cannot determine current directory")?
             .join(&self.config.script)
             .to_string_lossy()
             .into_owned();
@@ -112,7 +112,7 @@ impl Runtime for ExtensionRuntime {
             return Ok(());
         }
 
-        let project_dir = std::env::current_dir().unwrap_or_default();
+        let project_dir = std::env::current_dir().context("cannot determine current directory")?;
         let classmap_path = project_dir.join("vendor/composer/autoload_classmap.php");
 
         if !classmap_path.exists() {
