@@ -125,6 +125,7 @@ pub fn do_send(data: &[u8]) -> Result<(), &'static str> {
         let state = state.as_mut().ok_or("not in a worker thread")?;
 
         let reply = state.current_reply.take().ok_or("no pending request")?;
+        state.current_request_id = None;
         // JSON bytes → Value (only deserialization on the hot path)
         let value: serde_json::Value =
             serde_json::from_slice(data).unwrap_or(serde_json::Value::Null);
@@ -213,6 +214,7 @@ pub fn do_send_error(message: &str) -> Result<(), &'static str> {
         let state = state.as_mut().ok_or("not in a worker thread")?;
 
         let reply = state.current_reply.take().ok_or("no pending request")?;
+        state.current_request_id = None;
         let _ = reply.send(Err(anyhow::anyhow!("{message}")));
         Ok(())
     })
