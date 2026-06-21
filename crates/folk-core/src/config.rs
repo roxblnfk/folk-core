@@ -1,8 +1,8 @@
 //! Configuration loading.
 //!
 //! Folk reads `folk.toml` from the working directory by default, with
-//! environment-variable overrides via the `FOLK_` prefix (e.g.,
-//! `FOLK_WORKERS_COUNT=8`).
+//! environment-variable overrides via the `FOLK_` prefix and double-underscore
+//! section separator (e.g., `FOLK_WORKERS__COUNT=8`, `FOLK_HTTP__LISTEN=0.0.0.0:9000`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -211,7 +211,7 @@ impl FolkConfig {
         if path.exists() {
             fig = fig.merge(Toml::file(path));
         }
-        fig = fig.merge(Env::prefixed("FOLK_").split("_"));
+        fig = fig.merge(Env::prefixed("FOLK_").split("__"));
         fig.extract().context("failed to parse Folk configuration")
     }
 }

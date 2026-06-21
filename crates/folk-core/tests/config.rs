@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 
+use figment::Jail;
 use folk_core::config::{FolkConfig, LogConfig, LogFormat};
 use tempfile::NamedTempFile;
 
@@ -181,4 +182,50 @@ fn log_plugins_from_toml() {
     let filter = cfg.log.effective_filter();
     assert!(filter.contains("folk_plugin_http=debug"));
     assert!(filter.contains("folk_plugin_process=info"));
+}
+
+// --- env var override tests (issue #58) ---
+
+#[test]
+fn env_var_double_underscore_single_word_field() {
+    Jail::expect_with(|jail| {
+        jail.set_env("FOLK_WORKERS__COUNT", "16");
+        let cfg = FolkConfig::load().unwrap();
+        assert_eq!(cfg.workers.count, 16);
+        Ok(())
+    });
+}
+
+#[test]
+fn env_var_double_underscore_multi_word_field() {
+    Jail::expect_with(|jail| {
+        jail.set_env("FOLK_WORKERS__MAX_JOBS", "42");
+        let cfg = FolkConfig::load().unwrap();
+        assert_eq!(cfg.workers.max_jobs, 42);
+        Ok(())
+    });
+}
+
+#[test]
+fn env_var_double_underscore_duration_field() {
+    Jail::expect_with(|jail| {
+        jail.set_env("FOLK_SERVER__SHUTDOWN_TIMEOUT", "60s");
+        let cfg = FolkConfig::load().unwrap();
+        assert_eq!(
+            cfg.server.shutdown_timeout,
+            std::time::Duration::from_secs(60)
+        );
+        Ok(())
+    });
+}
+
+#[test]
+fn env_var_old_single_underscore_not_applied() {
+    Jail::expect_with(|jail| {
+        // Old format: single underscore — must NOT override the field (breaking change)
+        jail.set_env("FOLK_WORKERS_MAX_JOBS", "999");
+        let cfg = FolkConfig::load().unwrap();
+        assert_eq!(cfg.workers.max_jobs, 1000); // default unchanged
+        Ok(())
+    });
 }
