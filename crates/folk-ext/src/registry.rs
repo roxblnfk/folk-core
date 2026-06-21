@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use folk_api::{RpcHandler, RpcRegistrar};
 use tokio::sync::RwLock;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// In-process registry that stores plugin method handlers.
 /// Accessible from PHP via `folk_call()`.
@@ -48,7 +48,11 @@ impl InProcessRegistry {
 #[async_trait]
 impl RpcRegistrar for InProcessRegistry {
     async fn register_raw(&self, name: String, handler: RpcHandler) {
+        let mut handlers = self.handlers.write().await;
+        if handlers.contains_key(&name) {
+            warn!(method = %name, "duplicate RPC method registration; overwriting previous handler");
+        }
         debug!(method = %name, "registered plugin method");
-        self.handlers.write().await.insert(name, handler);
+        handlers.insert(name, handler);
     }
 }

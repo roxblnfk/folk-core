@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use folk_api::{HealthCheckFn, HealthRegistry, HealthStatus};
 use futures_util::future::join_all;
 use tokio::sync::RwLock;
+use tracing::warn;
 
 pub struct HealthRegistryImpl {
     checks: RwLock<HashMap<String, HealthCheckFn>>,
@@ -23,7 +24,14 @@ impl HealthRegistryImpl {
 #[async_trait]
 impl HealthRegistry for HealthRegistryImpl {
     async fn register(&self, plugin_name: String, check: HealthCheckFn) {
-        self.checks.write().await.insert(plugin_name, check);
+        let mut checks = self.checks.write().await;
+        if checks.contains_key(&plugin_name) {
+            warn!(
+                plugin = %plugin_name,
+                "duplicate health check registration; overwriting previous"
+            );
+        }
+        checks.insert(plugin_name, check);
     }
 
     async fn check_all(&self) -> HashMap<String, HealthStatus> {

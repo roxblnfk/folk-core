@@ -10,6 +10,7 @@ use prometheus::{
     CounterVec as PromCounterVec, Encoder, GaugeVec as PromGaugeVec, HistogramOpts,
     HistogramVec as PromHistogramVec, Opts, Registry, TextEncoder,
 };
+use tracing::warn;
 
 pub struct MetricsRegistryImpl {
     registry: Registry,
@@ -27,14 +28,18 @@ impl MetricsRegistry for MetricsRegistryImpl {
     fn counter_vec(&self, name: &str, help: &str, label_keys: &[&str]) -> Arc<dyn ApiCounterVec> {
         let opts = Opts::new(name, help);
         let cv = PromCounterVec::new(opts, label_keys).expect("valid counter spec");
-        let _ = self.registry.register(Box::new(cv.clone()));
+        if let Err(e) = self.registry.register(Box::new(cv.clone())) {
+            warn!(metric = name, error = %e, "duplicate metric registration; this counter will not appear in /metrics output");
+        }
         Arc::new(CounterVecAdapter { inner: cv })
     }
 
     fn gauge_vec(&self, name: &str, help: &str, label_keys: &[&str]) -> Arc<dyn ApiGaugeVec> {
         let opts = Opts::new(name, help);
         let gv = PromGaugeVec::new(opts, label_keys).expect("valid gauge spec");
-        let _ = self.registry.register(Box::new(gv.clone()));
+        if let Err(e) = self.registry.register(Box::new(gv.clone())) {
+            warn!(metric = name, error = %e, "duplicate metric registration; this gauge will not appear in /metrics output");
+        }
         Arc::new(GaugeVecAdapter { inner: gv })
     }
 
@@ -46,7 +51,9 @@ impl MetricsRegistry for MetricsRegistryImpl {
     ) -> Arc<dyn ApiHistogramVec> {
         let opts = HistogramOpts::new(name, help);
         let hv = PromHistogramVec::new(opts, label_keys).expect("valid histogram spec");
-        let _ = self.registry.register(Box::new(hv.clone()));
+        if let Err(e) = self.registry.register(Box::new(hv.clone())) {
+            warn!(metric = name, error = %e, "duplicate metric registration; this histogram will not appear in /metrics output");
+        }
         Arc::new(HistogramVecAdapter { inner: hv })
     }
 
