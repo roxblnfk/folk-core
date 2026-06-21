@@ -70,6 +70,36 @@ async fn execute_value_traced_returns_the_dispatched_id() {
 }
 
 #[tokio::test]
+async fn dead_slot_is_skipped_and_requests_routed_to_healthy_slot() {
+    // Slot 0 (first spawned worker) panics on execute.  The panic propagates
+    // through the supervisor task, dropping the slot's inbox receiver.  The
+    // pool must detect the closed channel (SendError) and route subsequent
+    // requests to slot 1 instead of permanently dropping them.
+    let rt = Arc::new(MockRuntime::with_panicking_slots(&[0u32]));
+    let config = WorkersConfig {
+        count: 2,
+        ..WorkersConfig::default()
+    };
+    let pool = WorkerPool::new(rt.clone(), config).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // First request hits slot 0 — supervisor panics, reply oneshot is dropped.
+    let _ = pool.execute_value("dispatch", json!({"seq": 0})).await;
+
+    // Let the supervisor task fully exit and drop its inbox receiver.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // All subsequent requests must succeed: the dead slot must be skipped.
+    for seq in 1u32..=5 {
+        let result = pool.execute_value("dispatch", json!({"seq": seq})).await;
+        assert!(
+            result.is_ok(),
+            "request {seq} should succeed after slot 0 died, got: {result:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn trigger_reload_recycles_idle_workers() {
     let rt = Arc::new(MockRuntime::echo());
     let config = WorkersConfig {

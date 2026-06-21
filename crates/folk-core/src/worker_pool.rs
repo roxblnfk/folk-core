@@ -196,14 +196,45 @@ async fn pool_main(
         slot_supervisors.push(supervisor);
     }
 
-    // Round-robin dispatch.
+    // Round-robin dispatch: on SendError the slot's inbox is permanently closed
+    // (its supervisor task exited/panicked). Mark the slot dead, recover the
+    // request value from the error and try the next live slot.
+    let n = slot_inboxes.len();
     let mut next: usize = 0;
-    while let Some(req) = request_rx.recv().await {
-        let chosen = next % slot_inboxes.len();
-        next = next.wrapping_add(1);
+    let mut dead: Vec<bool> = vec![false; n];
 
-        if slot_inboxes[chosen].send(req).await.is_err() {
-            warn!(slot_id = chosen, "slot inbox closed; failed to dispatch");
+    while let Some(initial_req) = request_rx.recv().await {
+        // Wrap in Option so we can move into send() and recover ownership on
+        // failure — the Rust borrow checker cannot track that `req = e.0`
+        // in the Err arm restores ownership through the loop.
+        let mut req: Option<DispatchRequest> = Some(initial_req);
+        let mut sent = false;
+
+        for attempt in 0..n {
+            let chosen = (next.wrapping_add(attempt)) % n;
+            if dead[chosen] {
+                continue;
+            }
+            let r = req.take().expect("req must be Some when slot is alive");
+            match slot_inboxes[chosen].send(r).await {
+                Ok(()) => {
+                    next = chosen.wrapping_add(1);
+                    sent = true;
+                    break;
+                },
+                Err(e) => {
+                    warn!(slot_id = chosen, "slot inbox closed; skipping dead slot");
+                    dead[chosen] = true;
+                    req = Some(e.0);
+                },
+            }
+        }
+
+        if !sent {
+            error!("all worker slot inboxes closed; cannot dispatch request");
+            if let Some(r) = req {
+                let _ = r.reply.send(Err(anyhow::anyhow!("all worker slots dead")));
+            }
         }
     }
 

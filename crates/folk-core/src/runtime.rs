@@ -82,6 +82,8 @@ pub struct MockRuntime {
     next_id: std::sync::atomic::AtomicU32,
     /// Request ids observed by all workers, in dispatch order. For test assertions.
     seen_request_ids: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Spawn indices (0-based) whose workers should panic on the first execute call.
+    panic_slots: std::collections::HashSet<u32>,
 }
 
 impl MockRuntime {
@@ -91,6 +93,19 @@ impl MockRuntime {
             responder: std::sync::Arc::new(|_method, payload| Ok(payload.clone())),
             next_id: std::sync::atomic::AtomicU32::new(10000),
             seen_request_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            panic_slots: std::collections::HashSet::default(),
+        }
+    }
+
+    /// Create a runtime where workers at the given spawn indices (0-based) panic
+    /// inside `execute`. The panic propagates through the supervisor task, dropping
+    /// the slot's inbox receiver — used to test dead-slot detection in the pool.
+    pub fn with_panicking_slots(indices: &[u32]) -> Self {
+        Self {
+            responder: std::sync::Arc::new(|_method, payload| Ok(payload.clone())),
+            next_id: std::sync::atomic::AtomicU32::new(10000),
+            seen_request_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            panic_slots: indices.iter().copied().collect(),
         }
     }
 
@@ -111,11 +126,14 @@ impl Runtime for MockRuntime {
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let spawn_index = id - 10000;
+        let should_panic = self.panic_slots.contains(&spawn_index);
         Ok(Box::new(MockWorker {
             id,
             responder: self.responder.clone(),
             seen_request_ids: self.seen_request_ids.clone(),
             terminated: false,
+            should_panic,
         }))
     }
 }
@@ -126,6 +144,8 @@ pub struct MockWorker {
     responder: MockResponder,
     seen_request_ids: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     terminated: bool,
+    /// If true, `execute` panics — used to simulate a supervisor task crash.
+    should_panic: bool,
 }
 
 #[async_trait]
@@ -144,6 +164,7 @@ impl WorkerHandle for MockWorker {
         payload: serde_json::Value,
         request_id: Arc<str>,
     ) -> Result<serde_json::Value> {
+        assert!(!self.should_panic, "simulated slot failure");
         if self.terminated {
             anyhow::bail!("worker terminated");
         }
