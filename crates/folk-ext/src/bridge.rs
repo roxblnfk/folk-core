@@ -127,9 +127,11 @@ pub fn do_send(data: &[u8]) -> Result<(), &'static str> {
         let reply = state.current_reply.take().ok_or("no pending request")?;
         state.current_request_id = None;
         // JSON bytes → Value (only deserialization on the hot path)
-        let value: serde_json::Value =
-            serde_json::from_slice(data).unwrap_or(serde_json::Value::Null);
-        let _ = reply.send(Ok(value));
+        let result = serde_json::from_slice(data).map_err(|e| {
+            tracing::error!("PHP returned malformed JSON: {e}");
+            anyhow::anyhow!("PHP returned malformed JSON: {e}")
+        });
+        let _ = reply.send(result);
         Ok(())
     })
 }
