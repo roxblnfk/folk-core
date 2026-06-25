@@ -53,6 +53,22 @@ impl FolkServer {
 
         self.config.workers.normalize();
 
+        // Dev mode (currently tied to `[dev] watch`) controls whether worker
+        // error responses expose the exception class + stack trace to clients.
+        // Exposed to PHP workers via `getenv("FOLK_DEV_MODE")`; in prod it stays
+        // unset so the SDK omits internals (info leak) — see folk-sdk WorkerLoop.
+        // NB: the name deliberately avoids the `FOLK_`+known-key collision the
+        // figment config loader would hit (e.g. `FOLK_DEV` maps to the `[dev]`
+        // table); `FOLK_DEV_MODE` maps to an unknown key that serde ignores.
+        if self.config.dev.watch {
+            // SAFETY: set once at startup, before any worker thread is spawned,
+            // so there is no concurrent access to the process environment.
+            #[allow(unsafe_code)]
+            unsafe {
+                std::env::set_var("FOLK_DEV_MODE", "1");
+            }
+        }
+
         info!(
             version = folk_api::FOLK_API_VERSION,
             workers = self.config.workers.count,

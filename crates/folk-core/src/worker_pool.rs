@@ -183,12 +183,20 @@ impl Executor for WorkerPool {
 
 /// Drain a `ResponseChunk` stream into a single `serde_json::Value`.
 ///
-/// Collects `Headers` and `Body` chunks; ignores `End`. Used by the
-/// non-streaming `execute_method` / `execute_value` paths for backward compat.
+/// Used by the non-streaming `execute_method` / `execute_value` paths (gRPC,
+/// jobs). The result depends on how the worker finalised the request:
+///
+/// * [`ResponseChunk::Return`] — the value is returned **verbatim** (gRPC/jobs
+///   need their `{__result}` / `{__grpc_status}` payload intact, not coerced
+///   into the HTTP `{status, headers, body}` shape);
+/// * [`ResponseChunk::Error`] — propagated as an `Err`;
+/// * a `Headers`/`Body` stream (no explicit `Return`) is reconstructed into the
+///   legacy `{status, headers, body}` shape for backward compatibility.
 async fn collect_stream(rx: &mut mpsc::Receiver<ResponseChunk>) -> Result<serde_json::Value> {
     let mut status: u16 = 200;
     let mut headers = std::collections::HashMap::new();
     let mut body_bytes: Vec<u8> = Vec::new();
+    let mut return_value: Option<serde_json::Value> = None;
 
     while let Some(chunk) = rx.recv().await {
         match chunk {
@@ -200,8 +208,14 @@ async fn collect_stream(rx: &mut mpsc::Receiver<ResponseChunk>) -> Result<serde_
                 headers = h;
             },
             ResponseChunk::Body(b) => body_bytes.extend_from_slice(&b),
+            ResponseChunk::Return(v) => return_value = Some(v),
+            ResponseChunk::Error(e) => return Err(anyhow::Error::new(e)),
             ResponseChunk::End => break,
         }
+    }
+
+    if let Some(value) = return_value {
+        return Ok(value);
     }
 
     // Reconstruct the legacy Value format that HTTP plugin / callers expect.

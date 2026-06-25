@@ -286,6 +286,8 @@ async fn collect_stream_to_value(
                 headers = h;
             },
             ResponseChunk::Body(b) => body_bytes.extend_from_slice(&b),
+            ResponseChunk::Return(v) => return Ok(v),
+            ResponseChunk::Error(e) => return Err(anyhow::Error::new(e)),
             ResponseChunk::End => break,
         }
     }

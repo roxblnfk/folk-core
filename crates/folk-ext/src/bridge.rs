@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 
 use bytes::Bytes;
-use folk_api::ResponseChunk;
+use folk_api::{ResponseChunk, WorkerError};
 use tracing::debug;
 
 /// A request sent from the server to a worker thread.
@@ -128,11 +128,12 @@ pub fn do_recv() -> Result<Option<(String, Vec<u8>)>, &'static str> {
     })
 }
 
-/// Send a successful response (raw JSON bytes from PHP).
+/// Send a response (raw JSON bytes from PHP) via the JSON dispatch path.
 ///
-/// Converts the JSON bytes from PHP into `ResponseChunk`s (Headers + Body + End)
-/// for backward compatibility — callers that use the new streaming API can skip
-/// this and call `folk_write_head` / `folk_write` / `folk_write_end` directly.
+/// Emits the worker's return value verbatim as [`ResponseChunk::Return`], unless
+/// the value carries an `__error` key — then it becomes [`ResponseChunk::Error`]
+/// (a fatal). Callers that use the streaming API call `folk_write_head` /
+/// `folk_write` / `folk_write_end` directly instead.
 pub fn do_send(data: &[u8]) -> Result<(), &'static str> {
     WORKER.with(|w| {
         let mut state = w.borrow_mut();
@@ -146,30 +147,49 @@ pub fn do_send(data: &[u8]) -> Result<(), &'static str> {
         state.current_request_id = None;
         state.stream_started = false;
 
-        let value: serde_json::Value = serde_json::from_slice(data).map_err(|e| {
-            tracing::error!("PHP returned malformed JSON: {e}");
-            "PHP returned malformed JSON"
-        })?;
+        let value: serde_json::Value = match serde_json::from_slice(data) {
+            Ok(v) => v,
+            Err(e) => {
+                // Malformed JSON is a fatal: surface it as an Error chunk so the
+                // consumer returns 500/502, not a silent 200 (regression #56).
+                tracing::error!("PHP returned malformed JSON: {e}");
+                let _ = stream_tx.blocking_send(ResponseChunk::Error(WorkerError::new(format!(
+                    "PHP returned malformed JSON: {e}"
+                ))));
+                let _ = stream_tx.blocking_send(ResponseChunk::End);
+                let _ = done_tx.send(());
+                return Err("PHP returned malformed JSON");
+            },
+        };
 
-        send_value_as_chunks(&value, &stream_tx);
+        if value.get("__error").is_some() {
+            let _ = stream_tx.blocking_send(ResponseChunk::Error(worker_error_from_value(&value)));
+        } else {
+            let _ = stream_tx.blocking_send(ResponseChunk::Return(value));
+        }
+        let _ = stream_tx.blocking_send(ResponseChunk::End);
         let _ = done_tx.send(());
         Ok(())
     })
 }
 
-/// Send an error response.
+/// Send a fatal error response.
 pub fn do_send_error(message: &str) -> Result<(), &'static str> {
     WORKER.with(|w| {
         let mut state = w.borrow_mut();
         let state = state.as_mut().ok_or("not in a worker thread")?;
 
-        // Close the stream (dropping stream_tx signals channel closed to consumer).
-        state.current_stream_tx.take();
+        let stream_tx = state.current_stream_tx.take();
+        let done_tx = state.current_done_tx.take();
         state.current_request_id = None;
         state.stream_started = false;
 
-        if let Some(done_tx) = state.current_done_tx.take() {
-            tracing::error!("PHP returned error: {message}");
+        tracing::error!("PHP returned error: {message}");
+        if let Some(tx) = stream_tx {
+            let _ = tx.blocking_send(ResponseChunk::Error(WorkerError::new(message)));
+            let _ = tx.blocking_send(ResponseChunk::End);
+        }
+        if let Some(done_tx) = done_tx {
             let _ = done_tx.send(());
         }
         Ok(())
@@ -331,15 +351,26 @@ pub fn run_dispatch_loop(dispatch_fn: &str) -> Result<(), &'static str> {
 
                     if let Some(tx) = stream_tx {
                         if stream_started {
-                            // PHP already sent headers. Ensure End is sent.
+                            // PHP already streamed via folk_write_*. Ensure End.
                             let _ = tx.blocking_send(ResponseChunk::End);
                         } else {
-                            // Backward compat: convert return Value to chunks.
+                            // Non-streaming handler: emit the return value
+                            // verbatim (Return), or a fatal (Error).
                             match result {
-                                Ok(ref value) => send_value_as_chunks(value, &tx),
-                                Err(ref e) => {
+                                Ok(value) => {
+                                    if value.get("__error").is_some() {
+                                        let _ = tx.blocking_send(ResponseChunk::Error(
+                                            worker_error_from_value(&value),
+                                        ));
+                                    } else {
+                                        let _ = tx.blocking_send(ResponseChunk::Return(value));
+                                    }
+                                },
+                                Err(e) => {
                                     tracing::error!("PHP handler error: {e}");
-                                    // Close the stream without sending chunks.
+                                    let _ = tx.blocking_send(ResponseChunk::Error(
+                                        WorkerError::new(e.to_string()),
+                                    ));
                                 },
                             }
                             let _ = tx.blocking_send(ResponseChunk::End);
@@ -358,46 +389,26 @@ pub fn run_dispatch_loop(dispatch_fn: &str) -> Result<(), &'static str> {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Convert a legacy `{status, headers, body}` Value into `ResponseChunks` and
-/// send them synchronously via `blocking_send` (safe from ZTS threads).
-fn send_value_as_chunks(value: &serde_json::Value, tx: &tokio::sync::mpsc::Sender<ResponseChunk>) {
-    let status = u16::try_from(
-        value
-            .get("status")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(200),
-    )
-    .unwrap_or(200);
-
-    let headers: HashMap<String, String> = value
-        .get("headers")
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let _ = tx.blocking_send(ResponseChunk::Headers { status, headers });
-
-    let body_str = value.get("body").and_then(|v| v.as_str()).unwrap_or("");
-    let body_encoding = value.get("body_encoding").and_then(|v| v.as_str());
-
-    let body_bytes: Bytes = if body_encoding == Some("base64") {
-        use base64::Engine;
-        match base64::engine::general_purpose::STANDARD.decode(body_str) {
-            Ok(b) => Bytes::from(b),
-            Err(e) => {
-                tracing::error!("send_value_as_chunks: base64 decode failed: {e}");
-                Bytes::new()
-            },
-        }
-    } else {
-        Bytes::from(body_str.as_bytes().to_vec())
-    };
-
-    if !body_bytes.is_empty() {
-        let _ = tx.blocking_send(ResponseChunk::Body(body_bytes));
+/// Build a [`WorkerError`] from a PHP `{__error, __error_class, __error_trace}`
+/// value. The class and trace are present only when the SDK populated them
+/// (dev mode); in production they are absent and stay `None`.
+fn worker_error_from_value(value: &serde_json::Value) -> WorkerError {
+    let message = value
+        .get("__error")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("worker error")
+        .to_string();
+    let exception_class = value
+        .get("__error_class")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let stacktrace = value
+        .get("__error_trace")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    WorkerError {
+        message,
+        exception_class,
+        stacktrace,
     }
 }
