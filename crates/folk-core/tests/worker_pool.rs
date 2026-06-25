@@ -125,7 +125,10 @@ async fn trigger_reload_recycles_idle_workers() {
 
     // Pool still serves requests after the reload.
     let response = pool
-        .execute_value("dispatch", json!({"status": 200, "headers": {}, "body": "ok"}))
+        .execute_value(
+            "dispatch",
+            json!({"status": 200, "headers": {}, "body": "ok"}),
+        )
         .await
         .unwrap();
     assert_eq!(response["status"], 200);

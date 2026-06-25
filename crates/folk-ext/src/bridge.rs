@@ -180,10 +180,7 @@ pub fn do_send_error(message: &str) -> Result<(), &'static str> {
 
 /// Start a streaming response: send status + headers. Must be called once per request.
 #[allow(clippy::implicit_hasher)]
-pub fn do_write_head(
-    status: u16,
-    headers: HashMap<String, String>,
-) -> Result<(), &'static str> {
+pub fn do_write_head(status: u16, headers: HashMap<String, String>) -> Result<(), &'static str> {
     WORKER.with(|w| {
         let mut state = w.borrow_mut();
         let state = state.as_mut().ok_or("not in a worker thread")?;
@@ -365,7 +362,10 @@ pub fn run_dispatch_loop(dispatch_fn: &str) -> Result<(), &'static str> {
 /// send them synchronously via `blocking_send` (safe from ZTS threads).
 fn send_value_as_chunks(value: &serde_json::Value, tx: &tokio::sync::mpsc::Sender<ResponseChunk>) {
     let status = u16::try_from(
-        value.get("status").and_then(serde_json::Value::as_u64).unwrap_or(200),
+        value
+            .get("status")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(200),
     )
     .unwrap_or(200);
 
