@@ -24,6 +24,11 @@ pub struct TaskRequest {
     /// Signals to the caller that PHP has finished handling the request (all
     /// chunks sent). The supervisor awaits this before accepting the next job.
     pub done_tx: tokio::sync::oneshot::Sender<()>,
+    /// Streaming request body. `Some` only when the HTTP plugin dispatched the
+    /// request before reading the body (`stream_request_body`). PHP pulls chunks
+    /// via `folk_read()` / `folk_read_all()`; the channel closing means EOF.
+    /// `None` in the buffered path — the body is already in `payload`.
+    pub body_rx: Option<tokio::sync::mpsc::Receiver<Bytes>>,
 }
 
 /// Thread-local state for the current worker.
@@ -38,6 +43,12 @@ struct WorkerState {
     /// Id of the request currently being handled on this thread (`None` if none).
     /// Exposed to PHP via `folk_request_id()`.
     current_request_id: Option<Arc<str>>,
+    /// Streaming request body for the in-flight request. `folk_read` pulls from
+    /// here; channel close = EOF. `None` outside a request or in buffered mode.
+    current_body_rx: Option<tokio::sync::mpsc::Receiver<Bytes>>,
+    /// Unconsumed tail of the last body chunk read from `current_body_rx`
+    /// (a single `folk_read(len)` may consume less than a full chunk).
+    current_body_leftover: Bytes,
 }
 
 thread_local! {
@@ -59,6 +70,8 @@ pub fn init_worker_state(
             current_done_tx: None,
             stream_started: false,
             current_request_id: None,
+            current_body_rx: None,
+            current_body_leftover: Bytes::new(),
         });
     });
 }
@@ -119,6 +132,8 @@ pub fn do_recv() -> Result<Option<(String, Vec<u8>)>, &'static str> {
             state.current_request_id = Some(req.request_id);
             state.current_stream_tx = Some(req.stream_tx);
             state.current_done_tx = Some(req.done_tx);
+            state.current_body_rx = req.body_rx;
+            state.current_body_leftover = Bytes::new();
             state.stream_started = false;
             Ok(Some((method, payload_bytes)))
         } else {
@@ -146,6 +161,8 @@ pub fn do_send(data: &[u8]) -> Result<(), &'static str> {
             .ok_or("no pending done channel")?;
         state.current_request_id = None;
         state.stream_started = false;
+        state.current_body_rx = None;
+        state.current_body_leftover = Bytes::new();
 
         let value: serde_json::Value = match serde_json::from_slice(data) {
             Ok(v) => v,
@@ -183,6 +200,8 @@ pub fn do_send_error(message: &str) -> Result<(), &'static str> {
         let done_tx = state.current_done_tx.take();
         state.current_request_id = None;
         state.stream_started = false;
+        state.current_body_rx = None;
+        state.current_body_leftover = Bytes::new();
 
         tracing::error!("PHP returned error: {message}");
         if let Some(tx) = stream_tx {
@@ -259,11 +278,70 @@ pub fn do_write_end() -> Result<(), &'static str> {
             .ok_or("no pending done channel")?;
         state.current_request_id = None;
         state.stream_started = false;
+        state.current_body_rx = None;
+        state.current_body_leftover = Bytes::new();
 
         let _ = stream_tx.blocking_send(ResponseChunk::End);
         drop(stream_tx);
         let _ = done_tx.send(());
         Ok(())
+    })
+}
+
+// ── Streaming request body API ───────────────────────────────────────────────
+
+/// Read up to `length` bytes of the request body, blocking until data is
+/// available. Returns an empty `Vec` at end-of-body (or when the request was
+/// not dispatched in streaming mode — `current_body_rx` is `None`).
+///
+/// Exposed to PHP via `folk_read()`. A single call may return fewer than
+/// `length` bytes; the unconsumed tail of a received chunk is buffered for the
+/// next call.
+pub fn do_read(length: usize) -> Vec<u8> {
+    WORKER.with(|w| {
+        let mut state_ref = w.borrow_mut();
+        let Some(state) = state_ref.as_mut() else {
+            return Vec::new();
+        };
+
+        // Refill the leftover buffer from the channel if it's empty.
+        if state.current_body_leftover.is_empty() {
+            let Some(rx) = state.current_body_rx.as_mut() else {
+                return Vec::new(); // no streaming body for this request
+            };
+            match rx.blocking_recv() {
+                Some(chunk) => state.current_body_leftover = chunk,
+                None => return Vec::new(), // EOF: channel closed
+            }
+        }
+
+        let take = length.min(state.current_body_leftover.len());
+        state.current_body_leftover.split_to(take).to_vec()
+    })
+}
+
+/// Read the entire remaining request body, blocking until end-of-body.
+///
+/// Returns an empty `Vec` when there is no streaming body. Exposed to PHP via
+/// `folk_read_all()`.
+pub fn do_read_all() -> Vec<u8> {
+    WORKER.with(|w| {
+        let mut state_ref = w.borrow_mut();
+        let Some(state) = state_ref.as_mut() else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        if !state.current_body_leftover.is_empty() {
+            out.extend_from_slice(&state.current_body_leftover);
+            state.current_body_leftover = Bytes::new();
+        }
+        if let Some(rx) = state.current_body_rx.as_mut() {
+            while let Some(chunk) = rx.blocking_recv() {
+                out.extend_from_slice(&chunk);
+            }
+        }
+        out
     })
 }
 
@@ -312,6 +390,7 @@ pub fn run_dispatch_loop(dispatch_fn: &str) -> Result<(), &'static str> {
                         payload,
                         stream_tx,
                         done_tx,
+                        body_rx,
                     } = req;
                     // Expose the id to PHP (folk_request_id()) for the duration
                     // of this call. call_dispatch runs OUTSIDE this borrow, so a
@@ -319,6 +398,8 @@ pub fn run_dispatch_loop(dispatch_fn: &str) -> Result<(), &'static str> {
                     state.current_request_id = Some(request_id);
                     state.current_stream_tx = Some(stream_tx);
                     state.current_done_tx = Some(done_tx);
+                    state.current_body_rx = body_rx;
+                    state.current_body_leftover = Bytes::new();
                     state.stream_started = false;
                     (method, payload)
                 } else {
@@ -348,6 +429,8 @@ pub fn run_dispatch_loop(dispatch_fn: &str) -> Result<(), &'static str> {
                     let done_tx = st.current_done_tx.take();
                     st.current_request_id = None;
                     st.stream_started = false;
+                    st.current_body_rx = None;
+                    st.current_body_leftover = Bytes::new();
 
                     if let Some(tx) = stream_tx {
                         if stream_started {

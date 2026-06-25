@@ -286,6 +286,34 @@ pub fn folk_write_end() -> PhpResult<()> {
     bridge::do_write_end().map_err(|e| PhpException::default(format!("folk_write_end: {e}")))
 }
 
+/// Read up to `length` bytes of the streaming request body.
+///
+/// Returns the next chunk of the request body, or an empty string at
+/// end-of-body. Blocks until data is available. Only yields data when the HTTP
+/// plugin dispatched the request in streaming mode (`stream_request_body`);
+/// otherwise the body is in `$payload['body']` and this returns `""`.
+///
+/// `length <= 0` is treated as the default chunk size (8192 bytes).
+#[cfg(feature = "standalone")]
+#[php_function]
+pub fn folk_read(length: i64) -> Binary<u8> {
+    let len = if length <= 0 {
+        8192
+    } else {
+        usize::try_from(length).unwrap_or(8192)
+    };
+    Binary::new(bridge::do_read(len))
+}
+
+/// Read the entire streaming request body, blocking until end-of-body.
+///
+/// Returns `""` when there is no streaming body (buffered mode or no body).
+#[cfg(feature = "standalone")]
+#[php_function]
+pub fn folk_read_all() -> Binary<u8> {
+    Binary::new(bridge::do_read_all())
+}
+
 /// Run the zero-copy dispatch loop.
 ///
 /// Blocks until the channel is closed (server shutdown). Calls the named
@@ -317,5 +345,7 @@ pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
         .function(wrap_function!(folk_write_head))
         .function(wrap_function!(folk_write))
         .function(wrap_function!(folk_write_end))
+        .function(wrap_function!(folk_read))
+        .function(wrap_function!(folk_read_all))
         .function(wrap_function!(folk_worker_run))
 }

@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use bytes::Bytes;
 use folk_api::ResponseChunk;
 use tokio::sync::mpsc;
 
@@ -54,6 +55,9 @@ pub trait WorkerHandle: Send + 'static {
     /// `stream_tx`. Returns `Ok(())` when the worker has finished the request
     /// and all chunks have been sent.
     ///
+    /// `body_rx`, when `Some`, streams the request body to PHP (`folk_read`);
+    /// `None` means the body is already embedded in `payload` (buffered mode).
+    ///
     /// The default implementation returns an error — concrete runtimes that
     /// support streaming must override this method.
     async fn execute_streaming(
@@ -62,6 +66,7 @@ pub trait WorkerHandle: Send + 'static {
         _payload: serde_json::Value,
         _request_id: Arc<str>,
         _stream_tx: mpsc::Sender<ResponseChunk>,
+        _body_rx: Option<mpsc::Receiver<Bytes>>,
     ) -> Result<()> {
         anyhow::bail!("execute_streaming not supported by this runtime")
     }
@@ -201,6 +206,7 @@ impl WorkerHandle for MockWorker {
         payload: serde_json::Value,
         request_id: Arc<str>,
         stream_tx: mpsc::Sender<ResponseChunk>,
+        _body_rx: Option<mpsc::Receiver<Bytes>>,
     ) -> Result<()> {
         let value = self.execute(method, payload, request_id).await?;
         folk_api::value_to_chunks(value, &stream_tx).await;

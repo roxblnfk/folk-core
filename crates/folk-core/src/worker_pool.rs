@@ -43,6 +43,8 @@ struct DispatchRequest {
     payload: serde_json::Value,
     stream_tx: mpsc::Sender<ResponseChunk>,
     permit: OwnedSemaphorePermit,
+    /// Streaming request body, if the caller dispatched before reading the body.
+    body_rx: Option<mpsc::Receiver<Bytes>>,
 }
 
 /// Worker pool — the dispatch surface.
@@ -110,6 +112,7 @@ impl WorkerPool {
         &self,
         method: &str,
         payload: serde_json::Value,
+        body_rx: Option<mpsc::Receiver<Bytes>>,
     ) -> Result<(mpsc::Receiver<ResponseChunk>, Arc<str>)> {
         let permit = self
             .semaphore
@@ -129,6 +132,7 @@ impl WorkerPool {
                 payload,
                 stream_tx,
                 permit,
+                body_rx,
             })
             .await
             .map_err(|_| anyhow!("pool task gone"))?;
@@ -143,7 +147,7 @@ impl Executor for WorkerPool {
         debug!(method, payload_len = payload.len(), "pool: execute_method");
         let value: serde_json::Value =
             serde_json::from_slice(&payload).context("pool: failed to parse payload as JSON")?;
-        let (mut rx, _id) = self.dispatch_streamed(method, value).await?;
+        let (mut rx, _id) = self.dispatch_streamed(method, value, None).await?;
         // Collect the full response by draining the stream.
         let result = collect_stream(&mut rx).await?;
         let bytes = serde_json::to_vec(&result).context("pool: failed to serialize response")?;
@@ -156,7 +160,7 @@ impl Executor for WorkerPool {
         payload: serde_json::Value,
     ) -> Result<serde_json::Value> {
         debug!(method, "pool: execute_value");
-        let (mut rx, _id) = self.dispatch_streamed(method, payload).await?;
+        let (mut rx, _id) = self.dispatch_streamed(method, payload, None).await?;
         collect_stream(&mut rx).await
     }
 
@@ -166,7 +170,7 @@ impl Executor for WorkerPool {
         payload: serde_json::Value,
     ) -> Result<(serde_json::Value, Arc<str>)> {
         debug!(method, "pool: execute_value_traced");
-        let (mut rx, id) = self.dispatch_streamed(method, payload).await?;
+        let (mut rx, id) = self.dispatch_streamed(method, payload, None).await?;
         let value = collect_stream(&mut rx).await?;
         Ok((value, id))
     }
@@ -177,7 +181,17 @@ impl Executor for WorkerPool {
         payload: serde_json::Value,
     ) -> Result<(mpsc::Receiver<ResponseChunk>, Arc<str>)> {
         debug!(method, "pool: execute_streamed");
-        self.dispatch_streamed(method, payload).await
+        self.dispatch_streamed(method, payload, None).await
+    }
+
+    async fn execute_streamed_with_body(
+        &self,
+        method: &str,
+        payload: serde_json::Value,
+        body_rx: mpsc::Receiver<Bytes>,
+    ) -> Result<(mpsc::Receiver<ResponseChunk>, Arc<str>)> {
+        debug!(method, "pool: execute_streamed_with_body");
+        self.dispatch_streamed(method, payload, Some(body_rx)).await
     }
 }
 
@@ -381,6 +395,7 @@ async fn slot_supervisor(
             payload,
             stream_tx,
             permit,
+            body_rx,
         } = req;
 
         let Some(w) = worker.as_mut() else {
@@ -389,7 +404,7 @@ async fn slot_supervisor(
         slot.mark_busy();
         let exec_result = tokio::time::timeout(
             config.exec_timeout,
-            w.execute_streaming(&method, payload, request_id.clone(), stream_tx),
+            w.execute_streaming(&method, payload, request_id.clone(), stream_tx, body_rx),
         )
         .await;
         // Release the semaphore slot now that PHP has finished (or timed out).

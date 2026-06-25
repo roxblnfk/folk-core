@@ -16,6 +16,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use bytes::Bytes;
 use folk_api::ResponseChunk;
 use folk_core::config::WorkersConfig;
 use folk_core::runtime::{Runtime, WorkerHandle};
@@ -204,7 +205,7 @@ impl WorkerHandle for ChannelWorkerHandle {
     ) -> Result<serde_json::Value> {
         // Wrap in a local streaming channel for backward compat.
         let (stream_tx, mut stream_rx) = sync::mpsc::channel(64);
-        self.execute_streaming(method, payload, request_id, stream_tx)
+        self.execute_streaming(method, payload, request_id, stream_tx, None)
             .await?;
         collect_stream_to_value(&mut stream_rx).await
     }
@@ -215,6 +216,7 @@ impl WorkerHandle for ChannelWorkerHandle {
         payload: serde_json::Value,
         request_id: Arc<str>,
         stream_tx: sync::mpsc::Sender<ResponseChunk>,
+        body_rx: Option<sync::mpsc::Receiver<Bytes>>,
     ) -> Result<()> {
         let tx = self
             .task_tx
@@ -233,6 +235,7 @@ impl WorkerHandle for ChannelWorkerHandle {
             payload,
             stream_tx,
             done_tx,
+            body_rx,
         })
         .map_err(|_| anyhow::anyhow!("worker process gone"))?;
 

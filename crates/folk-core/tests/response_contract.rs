@@ -70,11 +70,12 @@ impl WorkerHandle for ContractWorker {
         _payload: serde_json::Value,
         _request_id: Arc<str>,
         stream_tx: mpsc::Sender<ResponseChunk>,
+        _body_rx: Option<mpsc::Receiver<bytes::Bytes>>,
     ) -> Result<()> {
         match &self.emit {
             Emit::Return(v) => {
                 stream_tx.send(ResponseChunk::Return(v.clone())).await.ok();
-            }
+            },
             Emit::Error => {
                 stream_tx
                     .send(ResponseChunk::Error(WorkerError {
@@ -84,7 +85,7 @@ impl WorkerHandle for ContractWorker {
                     }))
                     .await
                     .ok();
-            }
+            },
         }
         stream_tx.send(ResponseChunk::End).await.ok();
         Ok(())
@@ -110,7 +111,10 @@ async fn return_value_is_passed_through_verbatim() {
     let pool = pool_with(Emit::Return(value.clone())).await;
 
     let got = pool.execute_value("grpc.call", json!({})).await.unwrap();
-    assert_eq!(got, value, "Return value must not be coerced to {{status,headers,body}}");
+    assert_eq!(
+        got, value,
+        "Return value must not be coerced to {{status,headers,body}}"
+    );
 }
 
 #[tokio::test]
@@ -120,5 +124,8 @@ async fn error_chunk_propagates_as_err() {
     let result = pool.execute_value("grpc.call", json!({})).await;
     assert!(result.is_err(), "Error chunk must surface as Err");
     let msg = format!("{:#}", result.unwrap_err());
-    assert!(msg.contains("boom"), "error should carry the message, got: {msg}");
+    assert!(
+        msg.contains("boom"),
+        "error should carry the message, got: {msg}"
+    );
 }
