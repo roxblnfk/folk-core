@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use folk_api::ResponseChunk;
+use tokio::sync::mpsc;
 
 /// A handle to a spawned worker.
 ///
@@ -44,6 +46,24 @@ pub trait WorkerHandle: Send + 'static {
     /// Returns `false` for the main thread worker which cannot be restarted.
     fn is_recyclable(&self) -> bool {
         true
+    }
+
+    /// Execute a request with a streaming reply channel.
+    ///
+    /// Chunks (including the final [`ResponseChunk::End`]) are sent to
+    /// `stream_tx`. Returns `Ok(())` when the worker has finished the request
+    /// and all chunks have been sent.
+    ///
+    /// The default implementation returns an error — concrete runtimes that
+    /// support streaming must override this method.
+    async fn execute_streaming(
+        &mut self,
+        _method: &str,
+        _payload: serde_json::Value,
+        _request_id: Arc<str>,
+        _stream_tx: mpsc::Sender<ResponseChunk>,
+    ) -> Result<()> {
+        anyhow::bail!("execute_streaming not supported by this runtime")
     }
 }
 
@@ -173,6 +193,18 @@ impl WorkerHandle for MockWorker {
             .unwrap()
             .push(request_id.to_string());
         (self.responder)(method, &payload)
+    }
+
+    async fn execute_streaming(
+        &mut self,
+        method: &str,
+        payload: serde_json::Value,
+        request_id: Arc<str>,
+        stream_tx: mpsc::Sender<ResponseChunk>,
+    ) -> Result<()> {
+        let value = self.execute(method, payload, request_id).await?;
+        folk_api::value_to_chunks(value, &stream_tx).await;
+        Ok(())
     }
 
     async fn terminate(&mut self) -> Result<()> {

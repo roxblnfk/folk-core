@@ -20,12 +20,17 @@ async fn execute_round_trips_through_mock_runtime() {
     // Wait a bit for workers to boot
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let payload = json!({"msg": "hello"});
+    // PHP workers always return {status, headers, body} format. The mock echoes
+    // back whatever payload is sent, so use a proper HTTP-format payload to
+    // exercise the full streaming round-trip.
+    let payload = json!({"status": 200, "headers": {"X-Test": "ok"}, "body": "hello"});
     let response = pool
         .execute_value("dispatch", payload.clone())
         .await
         .unwrap();
-    assert_eq!(response, payload);
+    assert_eq!(response["status"], 200);
+    assert_eq!(response["headers"]["X-Test"], "ok");
+    assert_eq!(response["body"], "hello");
 }
 
 #[tokio::test]
@@ -119,10 +124,9 @@ async fn trigger_reload_recycles_idle_workers() {
     assert_eq!(rt.spawn_count(), 6, "expected 3 fresh workers after reload");
 
     // Pool still serves requests after the reload.
-    let payload = json!({"msg": "after-reload"});
     let response = pool
-        .execute_value("dispatch", payload.clone())
+        .execute_value("dispatch", json!({"status": 200, "headers": {}, "body": "ok"}))
         .await
         .unwrap();
-    assert_eq!(response, payload);
+    assert_eq!(response["status"], 200);
 }

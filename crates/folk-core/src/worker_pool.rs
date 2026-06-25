@@ -8,8 +8,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
-use folk_api::Executor;
-use tokio::sync::{Semaphore, mpsc, oneshot, watch};
+use folk_api::{Executor, ResponseChunk};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -32,12 +32,17 @@ pub enum WorkError {
     Internal(String),
 }
 
-/// One dispatch request: id, method name, payload + reply channel.
+/// One dispatch request: id, method name, payload + streaming reply channel.
+///
+/// The `permit` is released when the PHP worker finishes the request (sends
+/// `ResponseChunk::End`). It is moved into the bridge thread-local and dropped
+/// there — `OwnedSemaphorePermit::drop` is atomic and safe from any thread.
 struct DispatchRequest {
     request_id: Arc<str>,
     method: String,
     payload: serde_json::Value,
-    reply: oneshot::Sender<Result<serde_json::Value>>,
+    stream_tx: mpsc::Sender<ResponseChunk>,
+    permit: OwnedSemaphorePermit,
 }
 
 /// Worker pool — the dispatch surface.
@@ -92,15 +97,20 @@ impl WorkerPool {
         info!(generation, "hot reload triggered; recycling workers");
     }
 
-    /// Dispatch a Value-based request through the pool.
+    /// Dispatch a streaming request through the pool.
     ///
-    /// Returns the response together with the `request_id` (a UUID v7) generated
-    /// for this request — the same id exposed to PHP via `folk_request_id()`.
-    async fn dispatch_value(
+    /// Returns an mpsc receiver of [`ResponseChunk`]s together with the
+    /// `request_id` (UUID v7) for this request.  The semaphore permit is
+    /// transferred into the bridge thread-local and dropped when PHP sends
+    /// `ResponseChunk::End`, freeing the worker slot for the next request.
+    ///
+    /// Callers must drain the receiver to `End` (or until the channel closes)
+    /// to allow the worker to proceed.
+    async fn dispatch_streamed(
         &self,
         method: &str,
         payload: serde_json::Value,
-    ) -> Result<(serde_json::Value, Arc<str>)> {
+    ) -> Result<(mpsc::Receiver<ResponseChunk>, Arc<str>)> {
         let permit = self
             .semaphore
             .clone()
@@ -108,42 +118,34 @@ impl WorkerPool {
             .await
             .context("pool semaphore closed")?;
 
-        // UUID v7: time-ordered (sortable by creation time) and globally unique
-        // across instances and restarts — usable as a single correlation key in
-        // aggregated logs.
+        // UUID v7: time-ordered and globally unique across instances/restarts.
         let request_id: Arc<str> = Arc::from(uuid::Uuid::now_v7().hyphenated().to_string());
-        let (reply_tx, reply_rx) = oneshot::channel();
+        let (stream_tx, stream_rx) = mpsc::channel(64);
+
         self.request_tx
             .send(DispatchRequest {
                 request_id: request_id.clone(),
                 method: method.to_string(),
                 payload,
-                reply: reply_tx,
+                stream_tx,
+                permit,
             })
             .await
             .map_err(|_| anyhow!("pool task gone"))?;
 
-        let result = reply_rx
-            .await
-            .map_err(|_| anyhow!("pool dropped reply channel"))?;
-
-        drop(permit);
-        result.map(|value| (value, request_id))
+        Ok((stream_rx, request_id))
     }
 }
 
 #[async_trait]
 impl Executor for WorkerPool {
     async fn execute_method(&self, method: &str, payload: Bytes) -> Result<Bytes> {
-        debug!(
-            method,
-            payload_len = payload.len(),
-            "pool: execute_method called (bytes path)"
-        );
-        // Legacy path: parse JSON bytes → Value → dispatch → Value → serialize
+        debug!(method, payload_len = payload.len(), "pool: execute_method");
         let value: serde_json::Value =
             serde_json::from_slice(&payload).context("pool: failed to parse payload as JSON")?;
-        let (result, _id) = self.dispatch_value(method, value).await?;
+        let (mut rx, _id) = self.dispatch_streamed(method, value).await?;
+        // Collect the full response by draining the stream.
+        let result = collect_stream(&mut rx).await?;
         let bytes = serde_json::to_vec(&result).context("pool: failed to serialize response")?;
         Ok(Bytes::from(bytes))
     }
@@ -153,9 +155,9 @@ impl Executor for WorkerPool {
         method: &str,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        debug!(method, "pool: execute_value called (zero-copy path)");
-        let (value, _id) = self.dispatch_value(method, payload).await?;
-        Ok(value)
+        debug!(method, "pool: execute_value");
+        let (mut rx, _id) = self.dispatch_streamed(method, payload).await?;
+        collect_stream(&mut rx).await
     }
 
     async fn execute_value_traced(
@@ -163,9 +165,57 @@ impl Executor for WorkerPool {
         method: &str,
         payload: serde_json::Value,
     ) -> Result<(serde_json::Value, Arc<str>)> {
-        debug!(method, "pool: execute_value_traced called");
-        self.dispatch_value(method, payload).await
+        debug!(method, "pool: execute_value_traced");
+        let (mut rx, id) = self.dispatch_streamed(method, payload).await?;
+        let value = collect_stream(&mut rx).await?;
+        Ok((value, id))
     }
+
+    async fn execute_streamed(
+        &self,
+        method: &str,
+        payload: serde_json::Value,
+    ) -> Result<(mpsc::Receiver<ResponseChunk>, Arc<str>)> {
+        debug!(method, "pool: execute_streamed");
+        self.dispatch_streamed(method, payload).await
+    }
+}
+
+/// Drain a `ResponseChunk` stream into a single `serde_json::Value`.
+///
+/// Collects `Headers` and `Body` chunks; ignores `End`. Used by the
+/// non-streaming `execute_method` / `execute_value` paths for backward compat.
+async fn collect_stream(rx: &mut mpsc::Receiver<ResponseChunk>) -> Result<serde_json::Value> {
+    let mut status: u16 = 200;
+    let mut headers = std::collections::HashMap::new();
+    let mut body_bytes: Vec<u8> = Vec::new();
+
+    while let Some(chunk) = rx.recv().await {
+        match chunk {
+            ResponseChunk::Headers {
+                status: s,
+                headers: h,
+            } => {
+                status = s;
+                headers = h;
+            },
+            ResponseChunk::Body(b) => body_bytes.extend_from_slice(&b),
+            ResponseChunk::End => break,
+        }
+    }
+
+    // Reconstruct the legacy Value format that HTTP plugin / callers expect.
+    let headers_value: serde_json::Value = headers
+        .into_iter()
+        .map(|(k, v)| (k, serde_json::Value::String(v)))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+
+    Ok(serde_json::json!({
+        "status": status,
+        "headers": headers_value,
+        "body": String::from_utf8_lossy(&body_bytes),
+    }))
 }
 
 // ---- Pool task ---------------------------------------------------------------
@@ -232,9 +282,7 @@ async fn pool_main(
 
         if !sent {
             error!("all worker slot inboxes closed; cannot dispatch request");
-            if let Some(r) = req {
-                let _ = r.reply.send(Err(anyhow::anyhow!("all worker slots dead")));
-            }
+            // permit drops with req — semaphore slot released on error
         }
     }
 
@@ -312,23 +360,34 @@ async fn slot_supervisor(
             },
         };
 
-        // Dispatch.
+        // Dispatch — destructure req so stream_tx and permit are clearly owned.
+        let DispatchRequest {
+            request_id,
+            method,
+            payload,
+            stream_tx,
+            permit,
+        } = req;
+
         let Some(w) = worker.as_mut() else {
             unreachable!()
         };
         slot.mark_busy();
-        let result = dispatch_one(
-            w.as_mut(),
-            &req.method,
-            req.payload,
-            req.request_id.clone(),
+        let exec_result = tokio::time::timeout(
             config.exec_timeout,
+            w.execute_streaming(&method, payload, request_id.clone(), stream_tx),
         )
         .await;
+        // Release the semaphore slot now that PHP has finished (or timed out).
+        drop(permit);
         slot.mark_idle();
 
-        // Send reply.
-        let _ = req.reply.send(result.map_err(anyhow::Error::from));
+        if let Err(e) = match exec_result {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!("worker execution timed out")),
+        } {
+            warn!(slot_id, error = ?e, "streaming dispatch error");
+        }
 
         // Recycle on reload (after the request completes) or per the lifecycle
         // policies (max_jobs / ttl).
@@ -384,20 +443,5 @@ async fn boot_worker(
             let _ = handle.terminate().await;
             anyhow::bail!("worker boot timed out after {:?}", config.boot_timeout)
         },
-    }
-}
-
-async fn dispatch_one(
-    worker: &mut dyn WorkerHandle,
-    method: &str,
-    payload: serde_json::Value,
-    request_id: Arc<str>,
-    exec_timeout: Duration,
-) -> Result<serde_json::Value, WorkError> {
-    let recv = tokio::time::timeout(exec_timeout, worker.execute(method, payload, request_id));
-    match recv.await {
-        Ok(Ok(result)) => Ok(result),
-        Ok(Err(e)) => Err(WorkError::Internal(e.to_string())),
-        Err(_) => Err(WorkError::Timeout),
     }
 }

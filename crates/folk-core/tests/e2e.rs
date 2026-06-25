@@ -22,10 +22,16 @@ async fn executor_round_trip_with_mock_runtime() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let payload = json!({"msg": "hello"});
+    // MockRuntime echoes the payload back. execute_value goes through the
+    // streaming path: value_to_chunks → ResponseChunk stream → collect_stream.
+    // The PHP response convention is {status, headers, body}; values missing
+    // those keys get defaults (200, {}, "").
+    let payload = json!({"status": 200, "headers": {"X-Test": "ok"}, "body": "hello"});
     let response = pool
         .execute_value("dispatch", payload.clone())
         .await
         .unwrap();
-    assert_eq!(response, payload);
+    assert_eq!(response["status"], 200);
+    assert_eq!(response["headers"]["X-Test"], "ok");
+    assert_eq!(response["body"], "hello");
 }

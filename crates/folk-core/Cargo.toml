@@ -15,7 +15,7 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
-folk-api = "0.2.2"
+folk-api = "0.2"
 
 tokio = { workspace = true }
 async-trait = { workspace = true }

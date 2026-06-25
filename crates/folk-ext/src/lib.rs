@@ -243,6 +243,49 @@ pub fn folk_request_id() -> String {
         .unwrap_or_default()
 }
 
+/// Start a streaming HTTP response by sending status and headers.
+///
+/// Must be called once per request before `folk_write` or `folk_write_end`.
+/// After calling this, the return value of the PHP handler is ignored.
+///
+/// `headers_json` is a JSON object `{"Header-Name": "value", ...}`.
+#[cfg(feature = "standalone")]
+#[php_function]
+#[allow(clippy::needless_pass_by_value)]
+pub fn folk_write_head(status: i64, headers_json: String) -> PhpResult<()> {
+    let headers: std::collections::HashMap<String, String> = serde_json::from_str(&headers_json)
+        .map_err(|e| {
+            PhpException::default(format!("folk_write_head: invalid headers JSON: {e}"))
+        })?;
+
+    let status_u16 = u16::try_from(status).map_err(|_| {
+        PhpException::default(format!("folk_write_head: invalid status code {status}"))
+    })?;
+
+    bridge::do_write_head(status_u16, headers)
+        .map_err(|e| PhpException::default(format!("folk_write_head: {e}")))
+}
+
+/// Send a chunk of the response body.
+///
+/// `folk_write_head` must have been called before calling this function.
+#[cfg(feature = "standalone")]
+#[php_function]
+#[allow(clippy::needless_pass_by_value)]
+pub fn folk_write(data: String) -> PhpResult<()> {
+    bridge::do_write(bytes::Bytes::from(data.into_bytes()))
+        .map_err(|e| PhpException::default(format!("folk_write: {e}")))
+}
+
+/// Finish the streaming response. No more writes are possible after this.
+///
+/// The PHP handler should return after calling `folk_write_end()`.
+#[cfg(feature = "standalone")]
+#[php_function]
+pub fn folk_write_end() -> PhpResult<()> {
+    bridge::do_write_end().map_err(|e| PhpException::default(format!("folk_write_end: {e}")))
+}
+
 /// Run the zero-copy dispatch loop.
 ///
 /// Blocks until the channel is closed (server shutdown). Calls the named
@@ -271,5 +314,8 @@ pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
         .function(wrap_function!(folk_worker_send_error))
         .function(wrap_function!(folk_is_worker_thread))
         .function(wrap_function!(folk_request_id))
+        .function(wrap_function!(folk_write_head))
+        .function(wrap_function!(folk_write))
+        .function(wrap_function!(folk_write_end))
         .function(wrap_function!(folk_worker_run))
 }

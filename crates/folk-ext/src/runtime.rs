@@ -8,6 +8,7 @@
 //! Uses `std::sync::mpsc` for task dispatch (worker thread blocks on recv).
 //! Uses `tokio::sync::oneshot` for reply (no blocking on tokio side).
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::thread;
@@ -15,8 +16,10 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use folk_api::ResponseChunk;
 use folk_core::config::WorkersConfig;
 use folk_core::runtime::{Runtime, WorkerHandle};
+use tokio::sync;
 use tracing::{debug, info, warn};
 
 use crate::bridge;
@@ -197,8 +200,22 @@ impl WorkerHandle for ChannelWorkerHandle {
         &mut self,
         method: &str,
         payload: serde_json::Value,
-        request_id: std::sync::Arc<str>,
+        request_id: Arc<str>,
     ) -> Result<serde_json::Value> {
+        // Wrap in a local streaming channel for backward compat.
+        let (stream_tx, mut stream_rx) = sync::mpsc::channel(64);
+        self.execute_streaming(method, payload, request_id, stream_tx)
+            .await?;
+        collect_stream_to_value(&mut stream_rx).await
+    }
+
+    async fn execute_streaming(
+        &mut self,
+        method: &str,
+        payload: serde_json::Value,
+        request_id: Arc<str>,
+        stream_tx: sync::mpsc::Sender<ResponseChunk>,
+    ) -> Result<()> {
         let tx = self
             .task_tx
             .as_ref()
@@ -206,24 +223,24 @@ impl WorkerHandle for ChannelWorkerHandle {
             .clone();
 
         let method = method.to_string();
-
-        // tokio oneshot for reply — send() is lock-free, recv() is async.
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = sync::oneshot::channel::<()>();
 
         // SyncSender::send blocks only when channel is full (capacity=8).
-        // With semaphore=4, at most 4 in-flight — never blocks.
+        // With semaphore=workers.count, at most N in-flight — never blocks.
         tx.send(bridge::TaskRequest {
             request_id,
             method,
             payload,
-            reply: reply_tx,
+            stream_tx,
+            done_tx,
         })
         .map_err(|_| anyhow::anyhow!("worker process gone"))?;
 
-        // Await reply asynchronously — no spawn_blocking needed!
-        reply_rx
+        // Await PHP completion asynchronously — no spawn_blocking needed.
+        done_rx
             .await
-            .map_err(|_| anyhow::anyhow!("worker dropped reply"))?
+            .map_err(|_| anyhow::anyhow!("worker dropped done channel"))?;
+        Ok(())
     }
 
     async fn terminate(&mut self) -> Result<()> {
@@ -246,4 +263,42 @@ impl WorkerHandle for ChannelWorkerHandle {
         // Main thread (preconnected) cannot be recycled — it IS the PHP process.
         self.thread_handle.is_some()
     }
+}
+
+/// Drain a stream of `ResponseChunk`s into a single `serde_json::Value`.
+///
+/// Reconstructs the legacy `{status, headers, body}` format that callers of
+/// `WorkerHandle::execute` expect. Used by the backward-compat `execute` impl.
+async fn collect_stream_to_value(
+    rx: &mut sync::mpsc::Receiver<ResponseChunk>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut status: u16 = 200;
+    let mut headers = std::collections::HashMap::new();
+    let mut body_bytes: Vec<u8> = Vec::new();
+
+    while let Some(chunk) = rx.recv().await {
+        match chunk {
+            ResponseChunk::Headers {
+                status: s,
+                headers: h,
+            } => {
+                status = s;
+                headers = h;
+            },
+            ResponseChunk::Body(b) => body_bytes.extend_from_slice(&b),
+            ResponseChunk::End => break,
+        }
+    }
+
+    let headers_value: serde_json::Value = headers
+        .into_iter()
+        .map(|(k, v)| (k, serde_json::Value::String(v)))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+
+    Ok(serde_json::json!({
+        "status": status,
+        "headers": headers_value,
+        "body": String::from_utf8_lossy(&body_bytes),
+    }))
 }

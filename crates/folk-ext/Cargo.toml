@@ -24,7 +24,7 @@ standalone = []
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-folk-api = "0.2.2"
+folk-api = "0.2"
 folk-core = { version = "0.3.0", path = "../folk-core" }
 
 ext-php-rs = "0.15"
@@ -36,6 +36,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+base64 = "0.22"
 
 [build-dependencies]
 ext-php-rs-build = "0.1"
