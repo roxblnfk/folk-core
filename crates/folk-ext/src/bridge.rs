@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 
 use bytes::Bytes;
-use folk_api::{ResponseChunk, WorkerError};
+use folk_api::{RequestBody, RequestPart, ResponseChunk, WorkerError};
 use tracing::debug;
 
 /// A request sent from the server to a worker thread.
@@ -25,10 +25,10 @@ pub struct TaskRequest {
     /// chunks sent). The supervisor awaits this before accepting the next job.
     pub done_tx: tokio::sync::oneshot::Sender<()>,
     /// Streaming request body. `Some` only when the HTTP plugin dispatched the
-    /// request before reading the body (`stream_request_body`). PHP pulls chunks
-    /// via `folk_read()` / `folk_read_all()`; the channel closing means EOF.
-    /// `None` in the buffered path — the body is already in `payload`.
-    pub body_rx: Option<tokio::sync::mpsc::Receiver<Bytes>>,
+    /// request before reading the body (`stream_request_body`):
+    /// [`RequestBody::Raw`] for `folk_read`, [`RequestBody::Parts`] for
+    /// `folk_next_part`. `None` in the buffered path — the body is in `payload`.
+    pub request_body: Option<RequestBody>,
 }
 
 /// Thread-local state for the current worker.
@@ -43,12 +43,29 @@ struct WorkerState {
     /// Id of the request currently being handled on this thread (`None` if none).
     /// Exposed to PHP via `folk_request_id()`.
     current_request_id: Option<Arc<str>>,
-    /// Streaming request body for the in-flight request. `folk_read` pulls from
-    /// here; channel close = EOF. `None` outside a request or in buffered mode.
-    current_body_rx: Option<tokio::sync::mpsc::Receiver<Bytes>>,
-    /// Unconsumed tail of the last body chunk read from `current_body_rx`
-    /// (a single `folk_read(len)` may consume less than a full chunk).
+    /// Streaming request body for the in-flight request. `folk_read` /
+    /// `folk_next_part` pull from here; channel close = EOF / no more parts.
+    /// `None` outside a request or in buffered mode.
+    current_body: Option<RequestBody>,
+    /// Unconsumed tail of the last chunk read (raw body, or the current
+    /// multipart part's data). A single `folk_read`/`folk_part_read(len)` may
+    /// consume less than a full chunk.
     current_body_leftover: Bytes,
+    /// Multipart cursor state (only meaningful for `RequestBody::Parts`).
+    current_part_state: PartState,
+}
+
+/// Position of the multipart cursor within the `RequestBody::Parts` stream.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PartState {
+    /// No part started yet (before the first `folk_next_part`).
+    BeforeFirst,
+    /// Inside a part — more `Data` may still arrive.
+    InPart,
+    /// The current part's `End` was consumed; `folk_part_read` returns "".
+    PartEnded,
+    /// The channel closed — no more parts.
+    Done,
 }
 
 thread_local! {
@@ -70,8 +87,9 @@ pub fn init_worker_state(
             current_done_tx: None,
             stream_started: false,
             current_request_id: None,
-            current_body_rx: None,
+            current_body: None,
             current_body_leftover: Bytes::new(),
+            current_part_state: PartState::BeforeFirst,
         });
     });
 }
@@ -132,8 +150,9 @@ pub fn do_recv() -> Result<Option<(String, Vec<u8>)>, &'static str> {
             state.current_request_id = Some(req.request_id);
             state.current_stream_tx = Some(req.stream_tx);
             state.current_done_tx = Some(req.done_tx);
-            state.current_body_rx = req.body_rx;
+            state.current_body = req.request_body;
             state.current_body_leftover = Bytes::new();
+            state.current_part_state = PartState::BeforeFirst;
             state.stream_started = false;
             Ok(Some((method, payload_bytes)))
         } else {
@@ -161,8 +180,9 @@ pub fn do_send(data: &[u8]) -> Result<(), &'static str> {
             .ok_or("no pending done channel")?;
         state.current_request_id = None;
         state.stream_started = false;
-        state.current_body_rx = None;
+        state.current_body = None;
         state.current_body_leftover = Bytes::new();
+        state.current_part_state = PartState::Done;
 
         let value: serde_json::Value = match serde_json::from_slice(data) {
             Ok(v) => v,
@@ -200,8 +220,9 @@ pub fn do_send_error(message: &str) -> Result<(), &'static str> {
         let done_tx = state.current_done_tx.take();
         state.current_request_id = None;
         state.stream_started = false;
-        state.current_body_rx = None;
+        state.current_body = None;
         state.current_body_leftover = Bytes::new();
+        state.current_part_state = PartState::Done;
 
         tracing::error!("PHP returned error: {message}");
         if let Some(tx) = stream_tx {
@@ -278,8 +299,9 @@ pub fn do_write_end() -> Result<(), &'static str> {
             .ok_or("no pending done channel")?;
         state.current_request_id = None;
         state.stream_started = false;
-        state.current_body_rx = None;
+        state.current_body = None;
         state.current_body_leftover = Bytes::new();
+        state.current_part_state = PartState::Done;
 
         let _ = stream_tx.blocking_send(ResponseChunk::End);
         drop(stream_tx);
@@ -296,7 +318,8 @@ pub fn do_write_end() -> Result<(), &'static str> {
 ///
 /// Exposed to PHP via `folk_read()`. A single call may return fewer than
 /// `length` bytes; the unconsumed tail of a received chunk is buffered for the
-/// next call.
+/// next call. Only yields data for a [`RequestBody::Raw`] body (returns empty
+/// for multipart — use `folk_next_part` — or buffered mode).
 pub fn do_read(length: usize) -> Vec<u8> {
     WORKER.with(|w| {
         let mut state_ref = w.borrow_mut();
@@ -306,8 +329,8 @@ pub fn do_read(length: usize) -> Vec<u8> {
 
         // Refill the leftover buffer from the channel if it's empty.
         if state.current_body_leftover.is_empty() {
-            let Some(rx) = state.current_body_rx.as_mut() else {
-                return Vec::new(); // no streaming body for this request
+            let Some(RequestBody::Raw(rx)) = state.current_body.as_mut() else {
+                return Vec::new(); // not a raw streaming body
             };
             match rx.blocking_recv() {
                 Some(chunk) => state.current_body_leftover = chunk,
@@ -322,8 +345,8 @@ pub fn do_read(length: usize) -> Vec<u8> {
 
 /// Read the entire remaining request body, blocking until end-of-body.
 ///
-/// Returns an empty `Vec` when there is no streaming body. Exposed to PHP via
-/// `folk_read_all()`.
+/// Returns an empty `Vec` when there is no raw streaming body. Exposed to PHP
+/// via `folk_read_all()`.
 pub fn do_read_all() -> Vec<u8> {
     WORKER.with(|w| {
         let mut state_ref = w.borrow_mut();
@@ -336,9 +359,141 @@ pub fn do_read_all() -> Vec<u8> {
             out.extend_from_slice(&state.current_body_leftover);
             state.current_body_leftover = Bytes::new();
         }
-        if let Some(rx) = state.current_body_rx.as_mut() {
+        if let Some(RequestBody::Raw(rx)) = state.current_body.as_mut() {
             while let Some(chunk) = rx.blocking_recv() {
                 out.extend_from_slice(&chunk);
+            }
+        }
+        out
+    })
+}
+
+// ── Streaming multipart API ──────────────────────────────────────────────────
+
+/// Advance to the next `multipart/form-data` part, blocking until its header
+/// arrives. Returns `Some(json)` with `{name, filename, content_type}` for the
+/// part, or `None` when there are no more parts (or this isn't a multipart
+/// streaming request).
+///
+/// If the current part was not fully read, its remaining data is drained and
+/// discarded first. Exposed to PHP via `folk_next_part()`.
+pub fn do_next_part() -> Option<String> {
+    WORKER.with(|w| {
+        let mut state_ref = w.borrow_mut();
+        let state = state_ref.as_mut()?;
+
+        let Some(RequestBody::Parts(rx)) = state.current_body.as_mut() else {
+            return None; // not a multipart streaming request
+        };
+        if state.current_part_state == PartState::Done {
+            return None;
+        }
+
+        // Drain the rest of the current part (if PHP didn't read it fully).
+        if state.current_part_state == PartState::InPart {
+            loop {
+                match rx.blocking_recv() {
+                    Some(RequestPart::Data(_)) => {},
+                    Some(RequestPart::End) => break,
+                    Some(RequestPart::Start { .. }) | None => {
+                        // Malformed stream or closed mid-part — treat as done.
+                        state.current_part_state = PartState::Done;
+                        state.current_body_leftover = Bytes::new();
+                        return None;
+                    },
+                }
+            }
+        }
+        state.current_body_leftover = Bytes::new();
+
+        // Read the next part header.
+        if let Some(RequestPart::Start {
+            name,
+            filename,
+            content_type,
+        }) = rx.blocking_recv()
+        {
+            state.current_part_state = PartState::InPart;
+            Some(
+                serde_json::json!({
+                    "name": name,
+                    "filename": filename,
+                    "content_type": content_type,
+                })
+                .to_string(),
+            )
+        } else {
+            // Channel closed (End/None) — no more parts.
+            state.current_part_state = PartState::Done;
+            None
+        }
+    })
+}
+
+/// Read up to `length` bytes of the current multipart part, blocking until data
+/// is available. Returns empty at the part's end. Exposed via `folk_part_read`.
+pub fn do_part_read(length: usize) -> Vec<u8> {
+    WORKER.with(|w| {
+        let mut state_ref = w.borrow_mut();
+        let Some(state) = state_ref.as_mut() else {
+            return Vec::new();
+        };
+        if state.current_part_state != PartState::InPart {
+            return Vec::new();
+        }
+
+        if state.current_body_leftover.is_empty() {
+            let Some(RequestBody::Parts(rx)) = state.current_body.as_mut() else {
+                return Vec::new();
+            };
+            match rx.blocking_recv() {
+                Some(RequestPart::Data(chunk)) => state.current_body_leftover = chunk,
+                Some(RequestPart::End) => {
+                    state.current_part_state = PartState::PartEnded;
+                    return Vec::new();
+                },
+                Some(RequestPart::Start { .. }) | None => {
+                    state.current_part_state = PartState::Done;
+                    return Vec::new();
+                },
+            }
+        }
+
+        let take = length.min(state.current_body_leftover.len());
+        state.current_body_leftover.split_to(take).to_vec()
+    })
+}
+
+/// Read the entire current multipart part, blocking until its end. Exposed via
+/// `folk_part_read_all()`.
+pub fn do_part_read_all() -> Vec<u8> {
+    WORKER.with(|w| {
+        let mut state_ref = w.borrow_mut();
+        let Some(state) = state_ref.as_mut() else {
+            return Vec::new();
+        };
+        if state.current_part_state != PartState::InPart {
+            return Vec::new();
+        }
+
+        let mut out = Vec::new();
+        if !state.current_body_leftover.is_empty() {
+            out.extend_from_slice(&state.current_body_leftover);
+            state.current_body_leftover = Bytes::new();
+        }
+        if let Some(RequestBody::Parts(rx)) = state.current_body.as_mut() {
+            loop {
+                match rx.blocking_recv() {
+                    Some(RequestPart::Data(chunk)) => out.extend_from_slice(&chunk),
+                    Some(RequestPart::End) => {
+                        state.current_part_state = PartState::PartEnded;
+                        break;
+                    },
+                    Some(RequestPart::Start { .. }) | None => {
+                        state.current_part_state = PartState::Done;
+                        break;
+                    },
+                }
             }
         }
         out
@@ -390,7 +545,7 @@ pub fn run_dispatch_loop(dispatch_fn: &str) -> Result<(), &'static str> {
                         payload,
                         stream_tx,
                         done_tx,
-                        body_rx,
+                        request_body,
                     } = req;
                     // Expose the id to PHP (folk_request_id()) for the duration
                     // of this call. call_dispatch runs OUTSIDE this borrow, so a
@@ -398,8 +553,9 @@ pub fn run_dispatch_loop(dispatch_fn: &str) -> Result<(), &'static str> {
                     state.current_request_id = Some(request_id);
                     state.current_stream_tx = Some(stream_tx);
                     state.current_done_tx = Some(done_tx);
-                    state.current_body_rx = body_rx;
+                    state.current_body = request_body;
                     state.current_body_leftover = Bytes::new();
+                    state.current_part_state = PartState::BeforeFirst;
                     state.stream_started = false;
                     (method, payload)
                 } else {
@@ -429,8 +585,9 @@ pub fn run_dispatch_loop(dispatch_fn: &str) -> Result<(), &'static str> {
                     let done_tx = st.current_done_tx.take();
                     st.current_request_id = None;
                     st.stream_started = false;
-                    st.current_body_rx = None;
+                    st.current_body = None;
                     st.current_body_leftover = Bytes::new();
+                    st.current_part_state = PartState::Done;
 
                     if let Some(tx) = stream_tx {
                         if stream_started {

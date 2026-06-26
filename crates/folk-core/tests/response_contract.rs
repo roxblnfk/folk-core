@@ -70,7 +70,7 @@ impl WorkerHandle for ContractWorker {
         _payload: serde_json::Value,
         _request_id: Arc<str>,
         stream_tx: mpsc::Sender<ResponseChunk>,
-        _body_rx: Option<mpsc::Receiver<bytes::Bytes>>,
+        _request_body: Option<folk_api::RequestBody>,
     ) -> Result<()> {
         match &self.emit {
             Emit::Return(v) => {

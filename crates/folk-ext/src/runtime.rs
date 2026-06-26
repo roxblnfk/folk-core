@@ -16,8 +16,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use bytes::Bytes;
-use folk_api::ResponseChunk;
+use folk_api::{RequestBody, ResponseChunk};
 use folk_core::config::WorkersConfig;
 use folk_core::runtime::{Runtime, WorkerHandle};
 use tokio::sync;
@@ -216,7 +215,7 @@ impl WorkerHandle for ChannelWorkerHandle {
         payload: serde_json::Value,
         request_id: Arc<str>,
         stream_tx: sync::mpsc::Sender<ResponseChunk>,
-        body_rx: Option<sync::mpsc::Receiver<Bytes>>,
+        request_body: Option<RequestBody>,
     ) -> Result<()> {
         let tx = self
             .task_tx
@@ -235,7 +234,7 @@ impl WorkerHandle for ChannelWorkerHandle {
             payload,
             stream_tx,
             done_tx,
-            body_rx,
+            request_body,
         })
         .map_err(|_| anyhow::anyhow!("worker process gone"))?;
 

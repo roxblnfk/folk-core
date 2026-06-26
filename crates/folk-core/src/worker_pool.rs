@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use bytes::Bytes;
-use folk_api::{Executor, ResponseChunk};
+use folk_api::{Executor, RequestBody, RequestPart, ResponseChunk};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -44,7 +44,7 @@ struct DispatchRequest {
     stream_tx: mpsc::Sender<ResponseChunk>,
     permit: OwnedSemaphorePermit,
     /// Streaming request body, if the caller dispatched before reading the body.
-    body_rx: Option<mpsc::Receiver<Bytes>>,
+    request_body: Option<RequestBody>,
 }
 
 /// Worker pool — the dispatch surface.
@@ -112,7 +112,7 @@ impl WorkerPool {
         &self,
         method: &str,
         payload: serde_json::Value,
-        body_rx: Option<mpsc::Receiver<Bytes>>,
+        request_body: Option<RequestBody>,
     ) -> Result<(mpsc::Receiver<ResponseChunk>, Arc<str>)> {
         let permit = self
             .semaphore
@@ -132,7 +132,7 @@ impl WorkerPool {
                 payload,
                 stream_tx,
                 permit,
-                body_rx,
+                request_body,
             })
             .await
             .map_err(|_| anyhow!("pool task gone"))?;
@@ -191,7 +191,19 @@ impl Executor for WorkerPool {
         body_rx: mpsc::Receiver<Bytes>,
     ) -> Result<(mpsc::Receiver<ResponseChunk>, Arc<str>)> {
         debug!(method, "pool: execute_streamed_with_body");
-        self.dispatch_streamed(method, payload, Some(body_rx)).await
+        self.dispatch_streamed(method, payload, Some(RequestBody::Raw(body_rx)))
+            .await
+    }
+
+    async fn execute_streamed_with_parts(
+        &self,
+        method: &str,
+        payload: serde_json::Value,
+        parts_rx: mpsc::Receiver<RequestPart>,
+    ) -> Result<(mpsc::Receiver<ResponseChunk>, Arc<str>)> {
+        debug!(method, "pool: execute_streamed_with_parts");
+        self.dispatch_streamed(method, payload, Some(RequestBody::Parts(parts_rx)))
+            .await
     }
 }
 
@@ -395,7 +407,7 @@ async fn slot_supervisor(
             payload,
             stream_tx,
             permit,
-            body_rx,
+            request_body,
         } = req;
 
         let Some(w) = worker.as_mut() else {
@@ -404,7 +416,13 @@ async fn slot_supervisor(
         slot.mark_busy();
         let exec_result = tokio::time::timeout(
             config.exec_timeout,
-            w.execute_streaming(&method, payload, request_id.clone(), stream_tx, body_rx),
+            w.execute_streaming(
+                &method,
+                payload,
+                request_id.clone(),
+                stream_tx,
+                request_body,
+            ),
         )
         .await;
         // Release the semaphore slot now that PHP has finished (or timed out).

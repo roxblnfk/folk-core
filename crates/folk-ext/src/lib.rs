@@ -314,6 +314,38 @@ pub fn folk_read_all() -> Binary<u8> {
     Binary::new(bridge::do_read_all())
 }
 
+/// Advance to the next `multipart/form-data` part.
+///
+/// Returns a JSON object `{"name":...,"filename":...,"content_type":...}` for
+/// the next part, or `null` when there are no more parts (or the request is not
+/// a multipart streaming request). Drains any unread data of the current part
+/// first. Read the part body with `folk_part_read` / `folk_part_read_all`.
+#[cfg(feature = "standalone")]
+#[php_function]
+pub fn folk_next_part() -> Option<String> {
+    bridge::do_next_part()
+}
+
+/// Read up to `length` bytes of the current multipart part. `""` at the part's
+/// end. `length <= 0` defaults to 8192.
+#[cfg(feature = "standalone")]
+#[php_function]
+pub fn folk_part_read(length: i64) -> Binary<u8> {
+    let len = if length <= 0 {
+        8192
+    } else {
+        usize::try_from(length).unwrap_or(8192)
+    };
+    Binary::new(bridge::do_part_read(len))
+}
+
+/// Read the entire current multipart part, blocking until its end.
+#[cfg(feature = "standalone")]
+#[php_function]
+pub fn folk_part_read_all() -> Binary<u8> {
+    Binary::new(bridge::do_part_read_all())
+}
+
 /// Run the zero-copy dispatch loop.
 ///
 /// Blocks until the channel is closed (server shutdown). Calls the named
@@ -347,5 +379,8 @@ pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
         .function(wrap_function!(folk_write_end))
         .function(wrap_function!(folk_read))
         .function(wrap_function!(folk_read_all))
+        .function(wrap_function!(folk_next_part))
+        .function(wrap_function!(folk_part_read))
+        .function(wrap_function!(folk_part_read_all))
         .function(wrap_function!(folk_worker_run))
 }
